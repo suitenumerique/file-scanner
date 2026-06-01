@@ -5,7 +5,7 @@ Flask-HTTPAuth>=4.5
 gunicorn>=21
 blinker>=1.6
 dnspython>=2.3
-ecs_logging>=2.0
+ecs_logging>=2.3.0
 
 # required for tests
 requests>=2.28
