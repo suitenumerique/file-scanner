@@ -27,6 +27,7 @@ class CiConfig(BaseConfig):
     CLAMD_HOST = "localhost"
     DEBUG = True
     TESTING = True
+    MAX_CONTENT_LENGTH = 4999999
     # pwd: letmein
     APPLICATION_USERS = "app1::$pbkdf2-sha256$29000$LiWkFELo3TvHGANACAGAkA$Re51NLQNiCYy0UAdnFbNfLltFDmiJOOzqjMPFRVBgMM"  # noqa
 

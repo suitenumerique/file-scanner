@@ -1,19 +1,14 @@
-import io
 import base64
 import json
 import unittest
 from io import BytesIO
 from unittest import mock
-import requests
-import logging
 
 import clamd
 
 import clamav_rest
 from clamav_versions import parse_local_version, parse_remote_version
 from version import __version__
-
-from flask_testing import LiveServerTestCase
 
 # pylint: disable=anomalous-backslash-in-string
 EICAR = b"X5O!P%@AP[4\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*"
@@ -242,75 +237,38 @@ class ClamAVRESTV2ScanTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 413)
 
 
-class ClamAVRESTV2ScanChunkedTestCase(LiveServerTestCase):
-    def create_app(self):
-        app = clamav_rest.app
-        app.config['TESTING'] = True
-
-        return app
-
+class ClamAVRESTV2ScanChunkedTestCase(unittest.TestCase):
     def setUp(self):
-        self.headers = _get_auth_header("app1", "letmein")
-        self.headers["Transfer-encoding"] = "chunked"
-        self.chunk_url = "http://localhost:5000/v2/scan-chunked"
-
-    @staticmethod
-    def _eicar_gen():
-        yield b"X5O!P%@AP[4\PZX54(P^)7CC)7}$"
-        yield b"EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*"
-
-    @staticmethod
-    def _archive_file():
-        with open("client-examples/protected.zip", "rb") as binary_file:
-            data = binary_file.read()
-
-        with io.BytesIO(data) as file_data:
-            while True:
-                # Yield 10 byte chunks
-                chunk = file_data.read(10)
-                yield chunk
-                
-                if not chunk:
-                    break
-
-    @staticmethod
-    def _text_file():
-        yield b"NO VIRUS HERE"
-        yield b"NO VIRUS HERE"
+        clamav_rest.app.config['TESTING'] = True
+        self.app = clamav_rest.app.test_client()
 
     def test_encrypted_archive(self):
-        response = requests.post(
-            self.chunk_url,
-            headers=self.headers,
-            data=self._archive_file(),
-        )
-
-        data = response.json()
+        with open("client-examples/protected.zip", "rb") as f:
+            data = f.read()
+        response = self.app.post("/v2/scan-chunked",
+                                 headers=_get_auth_header("app1", "letmein"),
+                                 content_type='application/octet-stream',
+                                 data=data)
+        result = json.loads(response.data.decode('utf8'))
         self.assertEqual(response.status_code, 200)
-        self.assertIn("malware", data)
+        self.assertIn("malware", result)
 
     def test_eicar(self):
-        response = requests.post(
-            self.chunk_url,
-            headers=self.headers,
-            data=self._eicar_gen(),
-        )
-
-        data = response.json()
-
-        self.assertEqual(data["malware"], True)
-        assert data["reason"] in EICAR_TEST_OUTPUTS
+        response = self.app.post("/v2/scan-chunked",
+                                 headers=_get_auth_header("app1", "letmein"),
+                                 content_type='application/octet-stream',
+                                 data=EICAR)
+        result = json.loads(response.data.decode('utf8'))
+        self.assertEqual(result["malware"], True)
+        assert result["reason"] in EICAR_TEST_OUTPUTS
 
     def test_clean_data(self):
-        response = requests.post(
-            self.chunk_url,
-            headers=self.headers,
-            data=self._text_file(),
-        )
-
-        data = response.json()
-
-        self.assertEqual(data["malware"], False)
+        response = self.app.post("/v2/scan-chunked",
+                                 headers=_get_auth_header("app1", "letmein"),
+                                 content_type='application/octet-stream',
+                                 data=b"NO VIRUS HERE")
+        result = json.loads(response.data.decode('utf8'))
+        self.assertEqual(result["malware"], False)
         self.assertEqual(response.status_code, 200)
 
 
