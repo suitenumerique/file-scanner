@@ -10,7 +10,6 @@ from flask_httpauth import HTTPBasicAuth
 
 import clamd
 from passlib.hash import pbkdf2_sha256 as hash
-from raven.contrib.flask import Sentry
 
 import clamav_versions as versions
 from version import __version__
@@ -48,8 +47,6 @@ try:
 except AttributeError:
     APPLICATION_USERS = {}
     logger.warning("No application users configured.")
-
-sentry = Sentry(app, dsn=app.config.get("SENTRY_DSN", None))
 
 auth = HTTPBasicAuth()
 

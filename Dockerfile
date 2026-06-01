@@ -1,13 +1,12 @@
-FROM python:3.9.1-buster
+FROM python:3.11-slim
 
-ENV PORT 8090
+ENV PORT=8090
 EXPOSE $PORT
 
-ENV WORKDIR /srv/clamav-rest
+WORKDIR /srv/clamav-rest
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
-WORKDIR $WORKDIR
-ADD . $WORKDIR
-
-RUN pip install -r requirements.txt
+COPY . .
 
 CMD ["/bin/bash", "/srv/clamav-rest/run.sh"]

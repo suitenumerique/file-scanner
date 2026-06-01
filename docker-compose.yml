@@ -1,5 +1,3 @@
-version: "3"
-
 services:
   nginx:
     image: nginx:stable-alpine
@@ -7,20 +5,31 @@ services:
       - ./docker/default-nginx-site.conf:/etc/nginx/conf.d/default.conf
     ports:
       - 3320:80
-    links:
-      - clamav_rest:clamav_rest
+    depends_on:
+      - clamav_rest
+
   clamav_rest:
     build: .
     volumes:
       - ./:/srv/clamav-rest
-    links:
-      - clamd:clamd
+    depends_on:
+      clamd:
+        condition: service_healthy
     environment:
       - APP_CONFIG=config.TestConfig
+
   clamd:
-    image: gcr.io/sre-docker-registry/github.com/uktrade/docker-clamav:master
+    image: clamav/clamav:1.4
     ports:
       - 3310:3310
-    environment:
-      - MIRROR_URL=db.local.clamav.net
-      
+    volumes:
+      - clamav_data:/var/lib/clamav
+    healthcheck:
+      test: ["CMD", "clamdscan", "--ping", "1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 120s
+
+volumes:
+  clamav_data:
