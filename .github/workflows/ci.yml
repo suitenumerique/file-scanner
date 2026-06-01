@@ -1,72 +1,43 @@
-name: Intégration continue 
+name: CI
 
 on:
-  workflow_dispatch: 
+  workflow_dispatch:
   push:
     branches: [main]
-  release:
-    types: [published]
-  
-defaults:
-  run:
-    shell: bash
+  pull_request:
 
 jobs:
   tests:
-    name: Tests unitaires
+    name: Tests
     runs-on: ubuntu-latest
-    strategy:
-      max-parallel: 5
-      matrix:
-        python-version: ["3.9","3.10","3.11"]
     services:
       clamav:
-        image: gcr.io/sre-docker-registry/github.com/uktrade/docker-clamav:master
+        image: clamav/clamav:1.4
         ports:
           - 3310:3310
-        env:
-          MIRROR_URL: db.local.clamav.net
-      
+
     steps:
-      - uses: actions/checkout@v2
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
-          python-version: "3.10"
-          cache: "pip"
+          python-version: "3.11"
+          cache: pip
           cache-dependency-path: requirements.txt
 
-      - name: Install Dependencies
-        run: |
-          pip install -r ./requirements.txt
+      - name: Install dependencies
+        run: pip install -r requirements.txt
 
-      - name: Wait up to 120 seconds for clamav container to start
+      - name: Wait for clamd
         run: |
-          for i in `seq 1 120`;
-          do
-            nc -z localhost 3310 && echo Success && exit 0
-            echo -n .
+          for i in $(seq 1 120); do
+            result=$(echo PING | nc -w1 localhost 3310 2>/dev/null)
+            if [ "$result" = "PONG" ]; then
+              echo "clamd ready"
+              exit 0
+            fi
             sleep 1
           done
-          echo clamav container never arrived && exit 1
+          echo "clamd never became ready" && exit 1
 
-      - name: Wait for clamav to be ready
-        run: |
-          for i in `seq 1 20`;
-          do
-              result=$(echo PING | nc localhost 3310)
-              
-              if [ "$result" == "PONG" ]; then
-                  echo $result
-                  exit 0
-              fi
-              
-              echo -n .
-              sleep 1
-          done
-          exit 0
-          echo Failed waiting for clamav && exit 1
-
-      - name: Run unit tests
-        run: |
-          APP_CONFIG=config.CiConfig python -m unittest tests.py -f
+      - name: Run tests
+        run: APP_CONFIG=config.CiConfig python -m unittest tests -f
