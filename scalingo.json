@@ -1,18 +1,27 @@
 {
   "name": "ClamAV Service",
-  "description": "A minimal ClamD REST interface",
-  "logo": "https://www.clamav.net/assets/clamav-trademark.png",
-  "repository": "https://github.com/betagouv/clamav-service",
-  "website": "https://beta.gouv.fr",
+  "description": "Service antivirus REST pour la Suite Numérique",
+  "repository": "https://github.com/suitenumerique/clamav-service",
   "env": {
     "APP_CONFIG": {
       "description": "Configuration du service",
       "value": "config.ProductionConfig"
     },
-    "APPLICATION_USERS": {
-      "description": "À modifier après le déploiement, ceux sont les mêmes que la CI",
-      "value": "app1::$pbkdf2-sha256$29000$LiWkFELo3TvHGANACAGAkA$Re51NLQNiCYy0UAdnFbNfLltFDmiJOOzqjMPFRVBgMM"
+    "API_KEYS": {
+      "description": "API keys au format service:key,service2:key2",
+      "required": true
+    },
+    "CLAMD_HOST": {
+      "description": "Hostname du daemon ClamAV",
+      "value": "clamav"
+    },
+    "CLAMD_SOCKET": {
+      "description": "Chemin du socket unix clamd (prioritaire sur CLAMD_HOST si défini)",
+      "value": ""
+    },
+    "ALLOWED_URL_HOSTS": {
+      "description": "Liste blanche de domaines pour scan-async, séparés par des virgules (vide = tout autorisé)",
+      "value": ""
     }
   }
 }
-

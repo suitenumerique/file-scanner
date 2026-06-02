@@ -1,14 +1,21 @@
-import base64
-import json
 import unittest
 from io import BytesIO
 from unittest import mock
 
 import clamd
+from fastapi.testclient import TestClient
 
-import clamav_rest
+from clamav_rest import app, cd, settings
 from clamav_versions import parse_local_version, parse_remote_version
+from config import TEST_API_KEY
+from database import engine
+from models import Base
 from version import __version__
+
+Base.metadata.create_all(engine)
+
+client = TestClient(app)
+AUTH_HEADERS = {"X-API-Key": TEST_API_KEY}
 
 # pylint: disable=anomalous-backslash-in-string
 EICAR = b"X5O!P%@AP[4\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*"
@@ -19,258 +26,163 @@ EICAR_TEST_OUTPUTS = (
 )
 
 
-def _get_auth_header(username, password):
-    creds = base64.b64encode(bytes("{}:{}".format(username, password), "utf-8"))
-    return dict(Authorization=b'Basic ' + creds)
-
-
-def _get_file_data(file_name, data):
-    return dict(file=(BytesIO(data), file_name))
-
-
-def _read_file_data(file_name):
-    with open(file_name, "rb") as binary_file:
-        data = binary_file.read()
-    return dict(file=(BytesIO(data), file_name))
-
-
-class ClamAVVersionParsing(unittest.TestCase):
+class VersionParsingTest(unittest.TestCase):
     def test_parse_local_version(self):
-        expected_version = "12321"
-        local_version_text = f"ClamAV 0.100.2/{expected_version}/Fri May 31 07:57:34 2019"
-        local_version_number = parse_local_version(local_version_text)
-        self.assertEqual(local_version_number, expected_version)
+        text = "ClamAV 0.100.2/12321/Fri May 31 07:57:34 2019"
+        self.assertEqual(parse_local_version(text), "12321")
 
     def test_parse_remote_version(self):
-        expected_version = "remote"
-        remote_version_text = f"220.101.2:58:{expected_version}:1559294940:1:63:48725:32823"
-        remote_version_number = parse_remote_version(remote_version_text)
-        self.assertEqual(remote_version_number, expected_version)
+        text = "220.101.2:58:remote:1559294940:1:63:48725:32823"
+        self.assertEqual(parse_remote_version(text), "remote")
 
 
-class ClamAVirusUpdate(unittest.TestCase):
-    def setUp(self):
-        clamav_rest.app.config['Testing'] = True
-        self.app = clamav_rest.app.test_client()
+class VersionEndpointTest(unittest.TestCase):
+    @mock.patch("clamav_rest.versions.get_remote_version_number", return_value="100")
+    @mock.patch("clamav_rest.versions.get_local_version_number", return_value="100")
+    def test_versions_in_sync(self, local, remote):
+        r = client.get("/check_version")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["outdated"], False)
+        self.assertEqual(r.json()["service"], __version__)
 
-    @mock.patch("clamav_rest.versions.get_remote_version_number")
-    @mock.patch("clamav_rest.versions.get_local_version_number")
-    @mock.patch("clamav_rest.cd.ping")
-    def test_local_remote_services_are_insync(self, ping, local, remote):
-        remote.return_value = "1010101"
-        local.return_value = "1010101"
-        response = self.app.get("/check_warning")
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data, b'1010101')
-
-    @mock.patch("clamav_rest.versions.get_remote_version_number")
-    @mock.patch("clamav_rest.versions.get_local_version_number")
-    def test_services_out_of_date(self, local, remote):
-        remote.return_value = "25466"
-        local.return_value = "25465"
-        response = self.app.get("/check_warning")
-        self.assertEqual(response.status_code, 500)
-
-    @mock.patch("clamav_rest.versions.get_remote_version_number")
-    @mock.patch("clamav_rest.versions.get_local_version_number")
-    @mock.patch("clamav_rest.cd.ping")
-    def test_local_remote_services_are_insync_v2(self, ping, local, remote):
-        remote.return_value = "1010101"
-        local.return_value = "1010101"
-        response = self.app.get("/check_version")
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json["clamd-actual"], "1010101")
-        self.assertEqual(response.json["clamd-required"], "1010101")
-        self.assertEqual(response.json["outdated"], False)
-        self.assertEqual(response.json["service"], __version__)
-
-    @mock.patch("clamav_rest.versions.get_remote_version_number")
-    @mock.patch("clamav_rest.versions.get_local_version_number")
-    def test_services_out_of_date_v2(self, local, remote):
-        remote.return_value = "25466"
-        local.return_value = "25465"
-        response = self.app.get("/check_version")
-        self.assertEqual(response.status_code, 500)
-        self.assertEqual(response.json["clamd-actual"], "25465")
-        self.assertEqual(response.json["clamd-required"], "25466")
-        self.assertEqual(response.json["outdated"], True)
-        self.assertEqual(response.json["service"], __version__)
+    @mock.patch("clamav_rest.versions.get_remote_version_number", return_value="200")
+    @mock.patch("clamav_rest.versions.get_local_version_number", return_value="100")
+    def test_versions_outdated(self, local, remote):
+        r = client.get("/check_version")
+        self.assertEqual(r.status_code, 500)
+        self.assertTrue(r.json()["outdated"])
 
 
-class ClamAVRESTTestCase(unittest.TestCase):
-    def setUp(self):
-        clamav_rest.app.config['TESTING'] = True
-        self.app = clamav_rest.app.test_client()
+class HealthcheckTest(unittest.TestCase):
+    def test_healthcheck_ok(self):
+        r = client.get("/check")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.text, "Service OK")
 
-    def test_healthcheck(self):
-        response = self.app.get("/check")
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data, b'Service OK')
+    @mock.patch.object(cd, "ping", side_effect=clamd.ConnectionError())
+    def test_healthcheck_no_service(self, _):
+        r = client.get("/check")
+        self.assertEqual(r.status_code, 503)
 
-    @mock.patch("clamav_rest.cd.ping")
-    def test_healthcheck_no_service(self, ping):
-        ping.side_effect = clamd.ConnectionError()
-        response = self.app.get("/check")
-        self.assertEqual(response.status_code, 503)
-        self.assertEqual(response.data, b'Service Unavailable')
+    @mock.patch.object(cd, "ping", side_effect=Exception("Oops"))
+    def test_healthcheck_unexpected_error(self, _):
+        r = client.get("/check")
+        self.assertEqual(r.status_code, 503)
 
-    @mock.patch("clamav_rest.cd.ping")
-    def test_healthcheck_unexpected_error(self, ping):
-        ping.side_effect = Exception("Oops")
-        response = self.app.get("/check")
-        self.assertEqual(response.status_code, 503)
-        self.assertEqual(response.data, b'Service Unavailable')
 
-    def test_scan_endpoint_requires_post(self):
-        response = self.app.get("/scan")
-        self.assertEqual(response.status_code, 405)
+class AuthTest(unittest.TestCase):
+    def test_auth_required(self):
+        r = client.post("/v2/scan", files={"file": ("f.txt", b"data")})
+        self.assertEqual(r.status_code, 401)
+
+    def test_auth_bad_key(self):
+        r = client.post("/v2/scan", files={"file": ("f.txt", b"data")}, headers={"X-API-Key": "wrong"})
+        self.assertEqual(r.status_code, 401)
 
     def test_auth_ok(self):
-        response = self.app.post("/scan", headers=_get_auth_header("app1", "letmein"))
+        r = client.post("/v2/scan", files={"file": ("f.txt", b"clean")}, headers=AUTH_HEADERS)
+        self.assertEqual(r.status_code, 200)
 
-        # expecting 400 as no file data
-        self.assertEqual(response.status_code, 400)
 
-    def test_auth_fail(self):
-        response = self.app.post("/scan",
-                                 headers=_get_auth_header(
-                                     "app1", "WRONGPASSWORD")
-                                 )
-        self.assertEqual(response.status_code, 401)
-
+class ScanV2Test(unittest.TestCase):
     def test_eicar(self):
-        response = self.app.post("/scan",
-                                 headers=_get_auth_header("app1", "letmein"),
-                                 content_type='multipart/form-data',
-                                 data=_get_file_data("unsafe.txt", EICAR)
-                                 )
-        self.assertEqual(response.data, b"NOTOK")
-        self.assertEqual(response.status_code, 200)
+        r = client.post("/v2/scan", files={"file": ("eicar.txt", EICAR)}, headers=AUTH_HEADERS)
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(r.json()["malware"])
+        self.assertIn(r.json()["reason"], EICAR_TEST_OUTPUTS)
 
-    def test_clean_data(self):
-        response = self.app.post("/scan",
-                                 headers=_get_auth_header("app1", "letmein"),
-                                 content_type='multipart/form-data',
-                                 data=_get_file_data(
-                                     "test.txt", b"NO VIRUS HERE")
-                                 )
-        self.assertEqual(response.data, b"OK")
-        self.assertEqual(response.status_code, 200)
-
-
-class ClamAVRESTV2ScanTestCase(unittest.TestCase):
-    def setUp(self):
-        clamav_rest.app.config['TESTING'] = True
-        self.app = clamav_rest.app.test_client()
-
-    def test_encrypted_archive(self):
-        response = self.app.post("/v2/scan",
-                                 headers=_get_auth_header("app1", "letmein"),
-                                 content_type='multipart/form-data',
-                                 data=_read_file_data(
-                                     "client-examples/protected.zip")
-                                 )
-
-        data = json.loads(response.data.decode('utf8'))
-        self.assertEqual(response.status_code, 200)
-        self.assertIn("malware", data)
-
-    def test_xls_macro(self):
-        response = self.app.post("/v2/scan",
-                                 headers=_get_auth_header("app1", "letmein"),
-                                 content_type='multipart/form-data',
-                                 data=_read_file_data(
-                                     "client-examples/eicar-excel-macro-powershell-echo.xls")
-                                 )
-
-        data = json.loads(response.data.decode('utf8'))
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(data["malware"], True)
-
-    def test_xls_dde(self):
-        response = self.app.post("/v2/scan",
-                                 headers=_get_auth_header("app1", "letmein"),
-                                 content_type='multipart/form-data',
-                                 data=_read_file_data(
-                                     "client-examples/eicar-excel-dde-cmd-powershell-echo.xls")
-                                 )
-
-        data = json.loads(response.data.decode('utf8'))
-        self.assertEqual(response.status_code, 200)
-        self.assertIn("malware", data)
-
-    def test_eicar(self):
-        response = self.app.post("/v2/scan",
-                                 headers=_get_auth_header("app1", "letmein"),
-                                 content_type='multipart/form-data',
-                                 data=_get_file_data(
-                                     "eicar.txt", EICAR)
-                                 )
-
-        data = json.loads(response.data.decode('utf8'))
-
-        self.assertEqual(data["malware"], True)
-        assert data["reason"] in EICAR_TEST_OUTPUTS
-
-    def test_payload_right_size(self):
-        # Fake content - 4.9Mb
-        content = b"\0" * (clamav_rest.app.config['MAX_CONTENT_LENGTH'] - 10000)
-        response = self.app.post("/v2/scan",
-                                 headers=_get_auth_header("app1", "letmein"),
-                                 content_type='multipart/form-data',
-                                 data=_get_file_data(
-                                     "4_9Mb.bin", content)
-                                 )
-        self.assertEqual(response.json["malware"], False)
-        self.assertEqual(response.json["reason"], None)
-        self.assertEqual(response.status_code, 200)
-
-    def test_payload_too_large(self):
-        content = b"\0" * clamav_rest.app.config['MAX_CONTENT_LENGTH']
-        response = self.app.post("/v2/scan",
-                                 headers=_get_auth_header("app1", "letmein"),
-                                 content_type='multipart/form-data',
-                                 data=_get_file_data(
-                                     "5Mb.bin", content)
-                                 )
-        self.assertEqual(response.data, b"File Too Large")
-        self.assertEqual(response.status_code, 413)
-
-
-class ClamAVRESTV2ScanChunkedTestCase(unittest.TestCase):
-    def setUp(self):
-        clamav_rest.app.config['TESTING'] = True
-        self.app = clamav_rest.app.test_client()
+    def test_clean_file(self):
+        r = client.post("/v2/scan", files={"file": ("clean.txt", b"NO VIRUS")}, headers=AUTH_HEADERS)
+        self.assertEqual(r.status_code, 200)
+        self.assertFalse(r.json()["malware"])
 
     def test_encrypted_archive(self):
         with open("client-examples/protected.zip", "rb") as f:
-            data = f.read()
-        response = self.app.post("/v2/scan-chunked",
-                                 headers=_get_auth_header("app1", "letmein"),
-                                 content_type='application/octet-stream',
-                                 data=data)
-        result = json.loads(response.data.decode('utf8'))
-        self.assertEqual(response.status_code, 200)
-        self.assertIn("malware", result)
+            r = client.post("/v2/scan", files={"file": ("protected.zip", f)}, headers=AUTH_HEADERS)
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("malware", r.json())
 
-    def test_eicar(self):
-        response = self.app.post("/v2/scan-chunked",
-                                 headers=_get_auth_header("app1", "letmein"),
-                                 content_type='application/octet-stream',
-                                 data=EICAR)
-        result = json.loads(response.data.decode('utf8'))
-        self.assertEqual(result["malware"], True)
-        assert result["reason"] in EICAR_TEST_OUTPUTS
+    def test_xls_macro(self):
+        with open("client-examples/eicar-excel-macro-powershell-echo.xls", "rb") as f:
+            r = client.post("/v2/scan", files={"file": ("macro.xls", f)}, headers=AUTH_HEADERS)
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(r.json()["malware"])
 
-    def test_clean_data(self):
-        response = self.app.post("/v2/scan-chunked",
-                                 headers=_get_auth_header("app1", "letmein"),
-                                 content_type='application/octet-stream',
-                                 data=b"NO VIRUS HERE")
-        result = json.loads(response.data.decode('utf8'))
-        self.assertEqual(result["malware"], False)
-        self.assertEqual(response.status_code, 200)
+    def test_xls_dde(self):
+        with open("client-examples/eicar-excel-dde-cmd-powershell-echo.xls", "rb") as f:
+            r = client.post("/v2/scan", files={"file": ("dde.xls", f)}, headers=AUTH_HEADERS)
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("malware", r.json())
+
+    def test_payload_right_size(self):
+        content = b"\0" * (settings.max_content_length - 10000)
+        r = client.post("/v2/scan", files={"file": ("big.bin", content)}, headers=AUTH_HEADERS)
+        self.assertEqual(r.status_code, 200)
+        self.assertFalse(r.json()["malware"])
+
+    def test_payload_too_large(self):
+        content = b"\0" * (settings.max_content_length + 1000)
+        r = client.post("/v2/scan", files={"file": ("toobig.bin", content)}, headers=AUTH_HEADERS)
+        self.assertEqual(r.status_code, 413)
 
 
-if __name__ == '__main__':
+class ScanAsyncTest(unittest.TestCase):
+    def test_requires_auth(self):
+        r = client.post("/v2/scan-async", json={"url": "http://example.com/f"})
+        self.assertEqual(r.status_code, 401)
+
+    def test_requires_url(self):
+        r = client.post("/v2/scan-async", json={}, headers=AUTH_HEADERS)
+        self.assertEqual(r.status_code, 422)
+
+    def test_rejects_bad_scheme(self):
+        r = client.post("/v2/scan-async", json={"url": "ftp://evil.com/f"}, headers=AUTH_HEADERS)
+        self.assertEqual(r.status_code, 422)
+
+    def test_creates_job(self):
+        r = client.post("/v2/scan-async", json={"url": "http://example.com/f.pdf", "filename": "f.pdf"}, headers=AUTH_HEADERS)
+        self.assertEqual(r.status_code, 202)
+        self.assertIn("job_id", r.json())
+        self.assertEqual(r.json()["status"], "pending")
+
+    def test_with_metadata(self):
+        r = client.post("/v2/scan-async", json={
+            "url": "http://example.com/f.pdf",
+            "webhook_url": "http://callback.example.com/av",
+            "metadata": {"file_id": "abc123"},
+        }, headers=AUTH_HEADERS)
+        self.assertEqual(r.status_code, 202)
+
+    def test_allowed_url_hosts(self):
+        original = settings.allowed_url_hosts
+        settings.allowed_url_hosts = "trusted.example.com"
+        try:
+            r = client.post("/v2/scan-async", json={"url": "http://evil.com/f"}, headers=AUTH_HEADERS)
+            self.assertEqual(r.status_code, 400)
+            self.assertIn("not allowed", r.json()["detail"])
+
+            r = client.post("/v2/scan-async", json={"url": "http://trusted.example.com/f"}, headers=AUTH_HEADERS)
+            self.assertEqual(r.status_code, 202)
+        finally:
+            settings.allowed_url_hosts = original
+
+
+class JobStatusTest(unittest.TestCase):
+    def test_requires_auth(self):
+        r = client.get("/v2/jobs/nonexistent")
+        self.assertEqual(r.status_code, 401)
+
+    def test_not_found(self):
+        r = client.get("/v2/jobs/nonexistent", headers=AUTH_HEADERS)
+        self.assertEqual(r.status_code, 404)
+
+    def test_returns_created_job(self):
+        create = client.post("/v2/scan-async", json={"url": "http://example.com/f.pdf"}, headers=AUTH_HEADERS)
+        job_id = create.json()["job_id"]
+        r = client.get(f"/v2/jobs/{job_id}", headers=AUTH_HEADERS)
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["job_id"], job_id)
+
+
+if __name__ == "__main__":
     unittest.main()

@@ -1,11 +1,14 @@
+fastapi>=0.111
+uvicorn[standard]>=0.30
+python-multipart>=0.0.9
+sqlalchemy>=2.0
+alembic>=1.13
+psycopg2-binary>=2.9
+celery[redis]>=5.3
+requests>=2.31
 clamd==1.0.2
-flask>=2.3,<4
-passlib==1.7.4
-Flask-HTTPAuth>=4.5
-gunicorn>=21
-blinker>=1.6
 dnspython>=2.3
-ecs_logging>=2.0
+httpx>=0.27
 
 # required for tests
 locust
