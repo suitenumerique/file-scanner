@@ -1,0 +1,22 @@
+name: Build and publish OCI images
+
+"on":
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+
+jobs:
+  docker-publish-scanner:
+    uses: ./.github/workflows/docker-publish.yml
+    permissions:
+      contents: read
+      packages: write
+      attestations: write
+      id-token: write
+    secrets: inherit
+    with:
+      image_name: "scanner"
+      context: "."

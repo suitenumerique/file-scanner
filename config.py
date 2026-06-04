@@ -13,11 +13,14 @@ class Settings:
     clamd_socket: str = ""
     host: str = "0.0.0.0"
     port: int = int(os.environ.get("PORT", "8090"))
-    max_content_length: int = 1 * 1024 * 1024 * 1024
-    database_url: str = "postgresql://clamav:clamav@localhost:5432/clamav"
+    max_upload_size: int = 100 * 1024 * 1024       # 100 Mo — upload direct
+    max_url_size: int = 2 * 1024 * 1024 * 1024     # 2 Go — scan par URL
     celery_broker_url: str = "redis://localhost:6379/0"
+    scan_dir: str = os.environ.get("SCAN_DIR", "/tmp/clamav-scan")
     url_download_timeout: int = 30
     allowed_url_hosts: str = ""
+    webhook_timeout: int = 10        # per-attempt timeout for webhook delivery
+    webhook_max_attempts: int = 3    # total delivery attempts before giving up
 
 
 TEST_API_KEY = "test-key-not-for-production"
@@ -26,8 +29,7 @@ CONFIGS = {
     "config.ProductionConfig": Settings(
         clamd_socket=os.environ.get("CLAMD_SOCKET", "/app/run/clamd.sock"),
         clamd_host=os.environ.get("CLAMD_HOST", "clamav"),
-        database_url=os.environ.get("DATABASE_URL", "postgresql://clamav:clamav@localhost:5432/clamav"),
-        celery_broker_url=os.environ.get("REDIS_URL", "redis://localhost:6379/0"),
+        celery_broker_url=os.environ.get("CELERY_BROKER_URL", "redis://localhost:6379/0"),
         api_keys=os.environ.get("API_KEYS", ""),
         allowed_url_hosts=os.environ.get("ALLOWED_URL_HOSTS", ""),
     ),
@@ -35,17 +37,17 @@ CONFIGS = {
         debug=True,
         testing=True,
         clamd_host="clamd",
-        max_content_length=4999999,
-        database_url=os.environ.get("DATABASE_URL", "postgresql://clamav:clamav@db:5432/clamav"),
-        celery_broker_url=os.environ.get("REDIS_URL", "redis://redis:6379/0"),
+        max_upload_size=4999999,
+        max_url_size=4999999,
+        celery_broker_url=os.environ.get("CELERY_BROKER_URL", "redis://clamav_redis:6379/0"),
         api_keys=f"drive:{TEST_API_KEY}",
     ),
     "config.CiConfig": Settings(
         debug=True,
         testing=True,
         clamd_host="localhost",
-        max_content_length=4999999,
-        database_url=os.environ.get("DATABASE_URL", "sqlite:///test.db"),
+        max_upload_size=4999999,
+        max_url_size=4999999,
         celery_broker_url="memory://",
         api_keys=f"drive:{TEST_API_KEY}",
     ),
@@ -53,8 +55,8 @@ CONFIGS = {
         debug=True,
         testing=True,
         clamd_host="localhost",
-        max_content_length=4999999,
-        database_url=os.environ.get("DATABASE_URL", "sqlite:///test.db"),
+        max_upload_size=4999999,
+        max_url_size=4999999,
         celery_broker_url="memory://",
         api_keys=f"drive:{TEST_API_KEY}",
     ),

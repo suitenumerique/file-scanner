@@ -1,5 +1,6 @@
 import logging
 import timeit
+import uuid
 from typing import Annotated, Optional
 from urllib.parse import urlparse
 
@@ -11,22 +12,12 @@ from pydantic import BaseModel, HttpUrl
 
 import clamav_versions as versions
 from config import get_settings
-from database import SessionLocal
-from models import ScanJob
-from tasks import celery_app, scan_url_task
+from tasks import celery_app, scan_task
 from version import __version__
 
 settings = get_settings()
 logger = logging.getLogger("CLAMAV-REST")
 logging.basicConfig(level=logging.DEBUG if settings.debug else logging.INFO)
-
-
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
 
 
 # --- Celery ---
@@ -80,6 +71,16 @@ class ScanAsyncRequest(BaseModel):
     metadata: Optional[dict] = None
 
 
+# --- Helpers ---
+
+def _validate_url(url: str):
+    if settings.allowed_url_hosts:
+        parsed = urlparse(url)
+        hosts = [h.strip() for h in settings.allowed_url_hosts.split(",") if h.strip()]
+        if hosts and parsed.hostname not in hosts:
+            raise HTTPException(400, detail=f"host {parsed.hostname} not allowed")
+
+
 # --- App ---
 
 app = FastAPI(title="ClamAV Service", version=__version__)
@@ -120,7 +121,7 @@ def scan_v2(
     file.file.seek(0, 2)
     size = file.file.tell()
     file.file.seek(0)
-    if size > settings.max_content_length:
+    if size > settings.max_upload_size:
         raise HTTPException(413, detail="File Too Large")
 
     logger.info(f"Starting scan for {username} of {file.filename}")
@@ -134,45 +135,27 @@ def scan_v2(
     return ScanResult(malware=status != "OK", reason=reason if status != "OK" else None, time=elapsed)
 
 
-
 @app.post("/v2/scan-async", status_code=202)
 def scan_async(
     body: ScanAsyncRequest,
     username: str = Depends(verify_auth),
-    db=Depends(get_db),
 ):
+    """Queue an asynchronous scan. Stateless: nothing is persisted — the result
+    is delivered exclusively via the (mandatory) ``webhook_url`` callback, so a
+    caller that can't receive webhooks must use the synchronous ``/v2/scan``.
+    """
     url_str = str(body.url)
-    parsed = urlparse(url_str)
+    _validate_url(url_str)
 
-    if settings.allowed_url_hosts:
-        hosts = [h.strip() for h in settings.allowed_url_hosts.split(",") if h.strip()]
-        if hosts and parsed.hostname not in hosts:
-            raise HTTPException(400, detail=f"host {parsed.hostname} not allowed")
+    if not body.webhook_url:
+        raise HTTPException(422, detail="webhook_url is required for async scans")
 
-    job = ScanJob(
-        url=url_str,
-        filename=body.filename,
-        webhook_url=body.webhook_url,
-        metadata_=body.metadata,
-        requested_by=username,
+    # The job id is just a correlation handle echoed back in the webhook
+    # payload; it is not a key to any stored record.
+    job_id = str(uuid.uuid4())
+    scan_task.delay(
+        job_id, url_str, body.filename, body.webhook_url, body.metadata
     )
-    db.add(job)
-    db.commit()
-    db.refresh(job)
 
-    scan_url_task.delay(job.id)
-
-    logger.info(f"Async scan job {job.id} created by {username} for {url_str}")
-    return job.to_dict()
-
-
-@app.get("/v2/jobs/{job_id}")
-def get_job(
-    job_id: str,
-    username: str = Depends(verify_auth),
-    db=Depends(get_db),
-):
-    job = db.get(ScanJob, job_id)
-    if not job:
-        raise HTTPException(404, detail="job not found")
-    return job.to_dict()
+    logger.info(f"Async scan job {job_id} created by {username} for {url_str}")
+    return {"job_id": job_id, "status": "pending"}

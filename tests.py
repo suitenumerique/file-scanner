@@ -1,5 +1,4 @@
 import unittest
-from io import BytesIO
 from unittest import mock
 
 import clamd
@@ -15,7 +14,7 @@ from version import __version__
 Base.metadata.create_all(engine)
 
 client = TestClient(app)
-AUTH_HEADERS = {"X-API-Key": TEST_API_KEY}
+AUTH = {"X-API-Key": TEST_API_KEY}
 
 # pylint: disable=anomalous-backslash-in-string
 EICAR = b"X5O!P%@AP[4\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*"
@@ -42,7 +41,7 @@ class VersionEndpointTest(unittest.TestCase):
     def test_versions_in_sync(self, local, remote):
         r = client.get("/check_version")
         self.assertEqual(r.status_code, 200)
-        self.assertEqual(r.json()["outdated"], False)
+        self.assertFalse(r.json()["outdated"])
         self.assertEqual(r.json()["service"], __version__)
 
     @mock.patch("clamav_rest.versions.get_remote_version_number", return_value="200")
@@ -80,49 +79,49 @@ class AuthTest(unittest.TestCase):
         self.assertEqual(r.status_code, 401)
 
     def test_auth_ok(self):
-        r = client.post("/v2/scan", files={"file": ("f.txt", b"clean")}, headers=AUTH_HEADERS)
+        r = client.post("/v2/scan", files={"file": ("f.txt", b"clean")}, headers=AUTH)
         self.assertEqual(r.status_code, 200)
 
 
 class ScanV2Test(unittest.TestCase):
     def test_eicar(self):
-        r = client.post("/v2/scan", files={"file": ("eicar.txt", EICAR)}, headers=AUTH_HEADERS)
+        r = client.post("/v2/scan", files={"file": ("eicar.txt", EICAR)}, headers=AUTH)
         self.assertEqual(r.status_code, 200)
         self.assertTrue(r.json()["malware"])
         self.assertIn(r.json()["reason"], EICAR_TEST_OUTPUTS)
 
     def test_clean_file(self):
-        r = client.post("/v2/scan", files={"file": ("clean.txt", b"NO VIRUS")}, headers=AUTH_HEADERS)
+        r = client.post("/v2/scan", files={"file": ("clean.txt", b"NO VIRUS")}, headers=AUTH)
         self.assertEqual(r.status_code, 200)
         self.assertFalse(r.json()["malware"])
 
     def test_encrypted_archive(self):
         with open("client-examples/protected.zip", "rb") as f:
-            r = client.post("/v2/scan", files={"file": ("protected.zip", f)}, headers=AUTH_HEADERS)
+            r = client.post("/v2/scan", files={"file": ("protected.zip", f)}, headers=AUTH)
         self.assertEqual(r.status_code, 200)
         self.assertIn("malware", r.json())
 
     def test_xls_macro(self):
         with open("client-examples/eicar-excel-macro-powershell-echo.xls", "rb") as f:
-            r = client.post("/v2/scan", files={"file": ("macro.xls", f)}, headers=AUTH_HEADERS)
+            r = client.post("/v2/scan", files={"file": ("macro.xls", f)}, headers=AUTH)
         self.assertEqual(r.status_code, 200)
         self.assertTrue(r.json()["malware"])
 
     def test_xls_dde(self):
         with open("client-examples/eicar-excel-dde-cmd-powershell-echo.xls", "rb") as f:
-            r = client.post("/v2/scan", files={"file": ("dde.xls", f)}, headers=AUTH_HEADERS)
+            r = client.post("/v2/scan", files={"file": ("dde.xls", f)}, headers=AUTH)
         self.assertEqual(r.status_code, 200)
         self.assertIn("malware", r.json())
 
     def test_payload_right_size(self):
-        content = b"\0" * (settings.max_content_length - 10000)
-        r = client.post("/v2/scan", files={"file": ("big.bin", content)}, headers=AUTH_HEADERS)
+        content = b"\0" * (settings.max_upload_size - 10000)
+        r = client.post("/v2/scan", files={"file": ("big.bin", content)}, headers=AUTH)
         self.assertEqual(r.status_code, 200)
         self.assertFalse(r.json()["malware"])
 
     def test_payload_too_large(self):
-        content = b"\0" * (settings.max_content_length + 1000)
-        r = client.post("/v2/scan", files={"file": ("toobig.bin", content)}, headers=AUTH_HEADERS)
+        content = b"\0" * (settings.max_upload_size + 1000)
+        r = client.post("/v2/scan", files={"file": ("toobig.bin", content)}, headers=AUTH)
         self.assertEqual(r.status_code, 413)
 
 
@@ -132,15 +131,15 @@ class ScanAsyncTest(unittest.TestCase):
         self.assertEqual(r.status_code, 401)
 
     def test_requires_url(self):
-        r = client.post("/v2/scan-async", json={}, headers=AUTH_HEADERS)
+        r = client.post("/v2/scan-async", json={}, headers=AUTH)
         self.assertEqual(r.status_code, 422)
 
     def test_rejects_bad_scheme(self):
-        r = client.post("/v2/scan-async", json={"url": "ftp://evil.com/f"}, headers=AUTH_HEADERS)
+        r = client.post("/v2/scan-async", json={"url": "ftp://evil.com/f"}, headers=AUTH)
         self.assertEqual(r.status_code, 422)
 
     def test_creates_job(self):
-        r = client.post("/v2/scan-async", json={"url": "http://example.com/f.pdf", "filename": "f.pdf"}, headers=AUTH_HEADERS)
+        r = client.post("/v2/scan-async", json={"url": "http://example.com/f.pdf", "filename": "f.pdf"}, headers=AUTH)
         self.assertEqual(r.status_code, 202)
         self.assertIn("job_id", r.json())
         self.assertEqual(r.json()["status"], "pending")
@@ -150,18 +149,18 @@ class ScanAsyncTest(unittest.TestCase):
             "url": "http://example.com/f.pdf",
             "webhook_url": "http://callback.example.com/av",
             "metadata": {"file_id": "abc123"},
-        }, headers=AUTH_HEADERS)
+        }, headers=AUTH)
         self.assertEqual(r.status_code, 202)
 
     def test_allowed_url_hosts(self):
         original = settings.allowed_url_hosts
         settings.allowed_url_hosts = "trusted.example.com"
         try:
-            r = client.post("/v2/scan-async", json={"url": "http://evil.com/f"}, headers=AUTH_HEADERS)
+            r = client.post("/v2/scan-async", json={"url": "http://evil.com/f"}, headers=AUTH)
             self.assertEqual(r.status_code, 400)
             self.assertIn("not allowed", r.json()["detail"])
 
-            r = client.post("/v2/scan-async", json={"url": "http://trusted.example.com/f"}, headers=AUTH_HEADERS)
+            r = client.post("/v2/scan-async", json={"url": "http://trusted.example.com/f"}, headers=AUTH)
             self.assertEqual(r.status_code, 202)
         finally:
             settings.allowed_url_hosts = original
@@ -173,13 +172,13 @@ class JobStatusTest(unittest.TestCase):
         self.assertEqual(r.status_code, 401)
 
     def test_not_found(self):
-        r = client.get("/v2/jobs/nonexistent", headers=AUTH_HEADERS)
+        r = client.get("/v2/jobs/nonexistent", headers=AUTH)
         self.assertEqual(r.status_code, 404)
 
     def test_returns_created_job(self):
-        create = client.post("/v2/scan-async", json={"url": "http://example.com/f.pdf"}, headers=AUTH_HEADERS)
+        create = client.post("/v2/scan-async", json={"url": "http://example.com/f.pdf"}, headers=AUTH)
         job_id = create.json()["job_id"]
-        r = client.get(f"/v2/jobs/{job_id}", headers=AUTH_HEADERS)
+        r = client.get(f"/v2/jobs/{job_id}", headers=AUTH)
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.json()["job_id"], job_id)
 

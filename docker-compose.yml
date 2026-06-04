@@ -3,36 +3,32 @@ services:
     build: .
     volumes:
       - ./:/srv/clamav-rest
+      - scan_data:/srv/scan
     ports:
       - 8090:8090
     depends_on:
       clamd:
         condition: service_healthy
-      db:
-        condition: service_healthy
-      redis:
+      clamav_redis:
         condition: service_started
     environment:
       - APP_CONFIG=config.TestConfig
-      - DATABASE_URL=postgresql://clamav:clamav@db:5432/clamav
-      - REDIS_URL=redis://redis:6379/0
+      - SCAN_DIR=/srv/scan
 
   celery_worker:
     build: .
     command: celery -A tasks:celery_app worker --loglevel=info --concurrency=2
     volumes:
       - ./:/srv/clamav-rest
+      - scan_data:/srv/scan
     depends_on:
       clamd:
         condition: service_healthy
-      db:
-        condition: service_healthy
-      redis:
+      clamav_redis:
         condition: service_started
     environment:
       - APP_CONFIG=config.TestConfig
-      - DATABASE_URL=postgresql://clamav:clamav@db:5432/clamav
-      - REDIS_URL=redis://redis:6379/0
+      - SCAN_DIR=/srv/scan
 
   clamd:
     image: clamav/clamav:1.4
@@ -40,6 +36,7 @@ services:
       - 3310:3310
     volumes:
       - clamav_data:/var/lib/clamav
+      - scan_data:/srv/scan
     healthcheck:
       test: ["CMD", "clamdscan", "--ping", "1"]
       interval: 10s
@@ -47,27 +44,13 @@ services:
       retries: 30
       start_period: 120s
 
-  db:
-    image: postgres:16-alpine
-    environment:
-      POSTGRES_USER: clamav
-      POSTGRES_PASSWORD: clamav
-      POSTGRES_DB: clamav
-    ports:
-      - 5432:5432
-    volumes:
-      - pg_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U clamav"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-
-  redis:
+  # Celery broker only — the service is otherwise stateless (async results are
+  # pushed via webhook, nothing is persisted).
+  clamav_redis:
     image: redis:7-alpine
     ports:
-      - 6379:6379
+      - 6380:6379
 
 volumes:
   clamav_data:
-  pg_data:
+  scan_data:
