@@ -7,11 +7,7 @@ from fastapi.testclient import TestClient
 from clamav_rest import app, cd, settings
 from clamav_versions import parse_local_version, parse_remote_version
 from config import TEST_API_KEY
-from database import engine
-from models import Base
 from version import __version__
-
-Base.metadata.create_all(engine)
 
 client = TestClient(app)
 AUTH = {"X-API-Key": TEST_API_KEY}
@@ -138,8 +134,16 @@ class ScanAsyncTest(unittest.TestCase):
         r = client.post("/v2/scan-async", json={"url": "ftp://evil.com/f"}, headers=AUTH)
         self.assertEqual(r.status_code, 422)
 
+    def test_requires_webhook(self):
+        r = client.post("/v2/scan-async", json={"url": "http://example.com/f.pdf"}, headers=AUTH)
+        self.assertEqual(r.status_code, 422)
+
     def test_creates_job(self):
-        r = client.post("/v2/scan-async", json={"url": "http://example.com/f.pdf", "filename": "f.pdf"}, headers=AUTH)
+        r = client.post("/v2/scan-async", json={
+            "url": "http://example.com/f.pdf",
+            "filename": "f.pdf",
+            "webhook_url": "http://callback.example.com/av",
+        }, headers=AUTH)
         self.assertEqual(r.status_code, 202)
         self.assertIn("job_id", r.json())
         self.assertEqual(r.json()["status"], "pending")
@@ -160,27 +164,13 @@ class ScanAsyncTest(unittest.TestCase):
             self.assertEqual(r.status_code, 400)
             self.assertIn("not allowed", r.json()["detail"])
 
-            r = client.post("/v2/scan-async", json={"url": "http://trusted.example.com/f"}, headers=AUTH)
+            r = client.post("/v2/scan-async", json={
+                "url": "http://trusted.example.com/f",
+                "webhook_url": "http://callback.example.com/av",
+            }, headers=AUTH)
             self.assertEqual(r.status_code, 202)
         finally:
             settings.allowed_url_hosts = original
-
-
-class JobStatusTest(unittest.TestCase):
-    def test_requires_auth(self):
-        r = client.get("/v2/jobs/nonexistent")
-        self.assertEqual(r.status_code, 401)
-
-    def test_not_found(self):
-        r = client.get("/v2/jobs/nonexistent", headers=AUTH)
-        self.assertEqual(r.status_code, 404)
-
-    def test_returns_created_job(self):
-        create = client.post("/v2/scan-async", json={"url": "http://example.com/f.pdf"}, headers=AUTH)
-        job_id = create.json()["job_id"]
-        r = client.get(f"/v2/jobs/{job_id}", headers=AUTH)
-        self.assertEqual(r.status_code, 200)
-        self.assertEqual(r.json()["job_id"], job_id)
 
 
 if __name__ == "__main__":
