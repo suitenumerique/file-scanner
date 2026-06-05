@@ -93,7 +93,14 @@ def scan_task(self, job_id, url, filename=None, webhook_url=None, metadata=None)
         elapsed = timeit.default_timer() - start_time
 
         scan_result = scan.get(file_path)
-        status, reason = ("OK", None) if scan_result is None else scan_result
+        # Fail closed: a missing entry (path not visible to clamd, access
+        # failure) or an ERROR verdict means the file was NOT scanned — never
+        # report that as clean.
+        if scan_result is None:
+            raise RuntimeError(f"clamd returned no verdict for {file_path}: {scan!r}")
+        status, reason = scan_result
+        if status == "ERROR":
+            raise RuntimeError(f"clamd scan error for {file_path}: {reason}")
 
         result.update(
             status="done",
