@@ -1,7 +1,5 @@
 # ClamAV Service
 
-[![Deploy on Scalingo](https://cdn.scalingo.com/deploy/button.svg)](https://dashboard.scalingo.com/create/app?source=https://github.com/betagouv/clamav-service#main)
-
 C'est une interface REST en python permettant d'interagir avec ClamD, et de
 scanner des fichiers à la demande.\
 Ce dépôt est basé sur
@@ -20,7 +18,6 @@ facilement rappatrier les évolutions du dépôt source.\
 Les différences majeures sont :
 
 - utilisation de Github Actions plutôt que Circle CI
-- ajout de fichiers de déploiements Scalingo
 
 ## Authentication
 
