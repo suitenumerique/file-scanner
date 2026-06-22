@@ -4,9 +4,11 @@ from unittest import mock
 import clamd
 from fastapi.testclient import TestClient
 
+import tasks
 from clamav_rest import app, cd, settings
 from clamav_versions import parse_local_version, parse_remote_version
 from config import TEST_API_KEY
+from tasks import _clamd_error_kind, scan_task
 from version import __version__
 
 client = TestClient(app)
@@ -171,6 +173,134 @@ class ScanAsyncTest(unittest.TestCase):
             self.assertEqual(r.status_code, 202)
         finally:
             settings.allowed_url_hosts = original
+
+
+class ClamdErrorKindTest(unittest.TestCase):
+    """An ERROR verdict from clamd is 'file' (unscannable — caller must drop
+    it) unless its reason carries an unambiguous resource signal, which makes
+    it 'transient' (retryable)."""
+
+    def test_transient_hints(self):
+        for reason in (
+            "can't allocate memory",
+            "Time limit reached",
+            "read timeout",
+            "No space left on device",
+            "WRITE: NO SPACE",  # case-insensitive
+        ):
+            self.assertEqual(_clamd_error_kind(reason), "transient", reason)
+
+    def test_file_reasons(self):
+        for reason in (
+            "Encrypted.PDF",
+            "Heuristics.Encrypted.Zip",
+            "Broken archive",
+            "",
+            None,
+        ):
+            self.assertEqual(_clamd_error_kind(reason), "file", repr(reason))
+
+
+class ScanTaskClassificationTest(unittest.TestCase):
+    """``scan_task`` runs eagerly and reports its verdict (and, on failure, an
+    ``error_kind``) through the single webhook channel. A *file* failure is
+    reported at once; a *transient* one only after the retry budget is spent,
+    so the webhook fires exactly once either way."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls._eager = tasks.celery_app.conf.task_always_eager
+        tasks.celery_app.conf.task_always_eager = True
+        tasks.celery_app.conf.task_eager_propagates = False
+
+    @classmethod
+    def tearDownClass(cls):
+        tasks.celery_app.conf.task_always_eager = cls._eager
+
+    def _run(self, scan=None, get=None, content_length=None):
+        """Run scan_task with the download + clamd boundaries stubbed and the
+        webhook captured. Returns the list of payloads pushed to the webhook."""
+        sent = []
+
+        def _capture(_url, payload):
+            sent.append(dict(payload))
+            return True
+
+        response = mock.MagicMock()
+        response.headers = (
+            {"Content-Length": str(content_length)} if content_length else {}
+        )
+        response.iter_content.return_value = [b"data"]
+
+        with mock.patch.object(tasks, "_send_webhook", side_effect=_capture), \
+            mock.patch.object(
+                tasks.http_requests,
+                "get",
+                side_effect=get,
+                return_value=None if get else response,
+            ), \
+            mock.patch.object(
+                tasks._cd,
+                "scan",
+                side_effect=scan or (lambda p: {p: ("OK", None)}),
+            ):
+            scan_task.apply(
+                args=["job1", "http://src/f.bin", "f.bin", "http://cb/av", None]
+            )
+        return sent
+
+    def test_clean(self):
+        sent = self._run(scan=lambda p: {p: ("OK", None)})
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(sent[0]["status"], "done")
+        self.assertFalse(sent[0]["malware"])
+        self.assertNotIn("error_kind", sent[0])
+
+    def test_infected(self):
+        sent = self._run(scan=lambda p: {p: ("FOUND", "Eicar-Test-Signature")})
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(sent[0]["status"], "done")
+        self.assertTrue(sent[0]["malware"])
+        self.assertEqual(sent[0]["reason"], "Eicar-Test-Signature")
+
+    def test_error_verdict_file(self):
+        sent = self._run(scan=lambda p: {p: ("ERROR", "Encrypted.PDF")})
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(sent[0]["status"], "error")
+        self.assertEqual(sent[0]["error_kind"], "file")
+
+    def test_error_verdict_transient(self):
+        sent = self._run(scan=lambda p: {p: ("ERROR", "Time limit reached")})
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(sent[0]["status"], "error")
+        self.assertEqual(sent[0]["error_kind"], "transient")
+
+    def test_no_verdict_is_transient(self):
+        sent = self._run(scan=lambda p: {})
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(sent[0]["error_kind"], "transient")
+
+    def test_too_large_is_file(self):
+        sent = self._run(content_length=settings.max_url_size + 1)
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(sent[0]["status"], "error")
+        self.assertEqual(sent[0]["error_kind"], "file")
+
+    def test_download_failure_is_transient(self):
+        def _boom(*_a, **_k):
+            raise tasks.http_requests.RequestException("connection reset")
+
+        sent = self._run(get=_boom)
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(sent[0]["error_kind"], "transient")
+
+    def test_clamd_connection_error_is_transient(self):
+        def _boom(_p):
+            raise clamd.ConnectionError("clamd down")
+
+        sent = self._run(scan=_boom)
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(sent[0]["error_kind"], "transient")
 
 
 if __name__ == "__main__":

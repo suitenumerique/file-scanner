@@ -55,6 +55,36 @@ def _send_webhook(webhook_url, payload):
     return False
 
 
+class ScanError(Exception):
+    """A scan that failed, tagged with whether a retry could help.
+
+    ``kind="transient"`` — infrastructure (clamd unreachable, download glitch,
+    path not visible): a retry may succeed. ``kind="file"`` — the file itself
+    can't be scanned (clamd opened it but rejected its content, oversized): a
+    retry won't help, the caller should ask the user to remove it.
+    """
+
+    def __init__(self, message, kind):
+        super().__init__(message)
+        self.kind = kind
+
+
+# clamd returns an ERROR verdict for both file problems (encrypted, malformed,
+# oversized) and the occasional infra hiccup. Default such verdicts to "file"
+# and only downgrade to "transient" on these unambiguous resource signals.
+_TRANSIENT_CLAMD_HINTS = (
+    "allocate",
+    "time limit",
+    "timeout",
+    "no space",
+)
+
+
+def _clamd_error_kind(reason):
+    text = (reason or "").lower()
+    return "transient" if any(h in text for h in _TRANSIENT_CLAMD_HINTS) else "file"
+
+
 @celery_app.task(bind=True, max_retries=2, default_retry_delay=30)
 def scan_task(self, job_id, url, filename=None, webhook_url=None, metadata=None):
     """Download a file from ``url``, scan it, and push the result to ``webhook_url``.
@@ -77,6 +107,7 @@ def scan_task(self, job_id, url, filename=None, webhook_url=None, metadata=None)
             response.close()
             result.update(
                 status="error",
+                error_kind="file",
                 error=f"file_too_large: {content_length} bytes exceeds "
                 f"{settings.max_url_size} limit",
             )
@@ -97,10 +128,18 @@ def scan_task(self, job_id, url, filename=None, webhook_url=None, metadata=None)
         # failure) or an ERROR verdict means the file was NOT scanned — never
         # report that as clean.
         if scan_result is None:
-            raise RuntimeError(f"clamd returned no verdict for {file_path}: {scan!r}")
+            # No entry for our path: clamd couldn't see / access the file
+            # (mount or config issue) — infrastructure, so retryable.
+            raise ScanError(
+                f"clamd returned no verdict for {file_path}: {scan!r}",
+                kind="transient",
+            )
         status, reason = scan_result
         if status == "ERROR":
-            raise RuntimeError(f"clamd scan error for {file_path}: {reason}")
+            raise ScanError(
+                f"clamd scan error for {file_path}: {reason}",
+                kind=_clamd_error_kind(reason),
+            )
 
         result.update(
             status="done",
@@ -115,8 +154,25 @@ def scan_task(self, job_id, url, filename=None, webhook_url=None, metadata=None)
         if webhook_url:
             _send_webhook(webhook_url, result)
 
+    except ScanError as exc:
+        logger.error(f"Job {job_id} scan error ({exc.kind}): {exc}")
+        # A file-bound failure won't pass on retry — report it at once. A
+        # transient one gets the normal retry budget before we give up.
+        if exc.kind == "file":
+            result.update(status="error", error_kind="file", error=str(exc))
+            if webhook_url:
+                _send_webhook(webhook_url, result)
+            return
+        if self.request.retries >= self.max_retries:
+            result.update(status="error", error_kind="transient", error=str(exc))
+            if webhook_url:
+                _send_webhook(webhook_url, result)
+        raise self.retry(exc=exc)
+
     except http_requests.RequestException as exc:
-        result.update(status="error", error=f"download_failed: {exc}")
+        result.update(
+            status="error", error_kind="transient", error=f"download_failed: {exc}"
+        )
         logger.error(f"Job {job_id} download failed: {exc}")
         if webhook_url:
             _send_webhook(webhook_url, result)
@@ -126,7 +182,9 @@ def scan_task(self, job_id, url, filename=None, webhook_url=None, metadata=None)
         # Transient — only notify once retries are exhausted, so the caller
         # isn't told "error" for a scan a retry may still complete.
         if self.request.retries >= self.max_retries:
-            result.update(status="error", error=f"scan_failed: {exc}")
+            result.update(
+                status="error", error_kind="transient", error=f"scan_failed: {exc}"
+            )
             if webhook_url:
                 _send_webhook(webhook_url, result)
         raise self.retry(exc=exc)
@@ -134,7 +192,7 @@ def scan_task(self, job_id, url, filename=None, webhook_url=None, metadata=None)
     except Exception as exc:
         logger.error(f"Job {job_id} unexpected error: {exc}")
         if self.request.retries >= self.max_retries:
-            result.update(status="error", error=str(exc))
+            result.update(status="error", error_kind="transient", error=str(exc))
             if webhook_url:
                 _send_webhook(webhook_url, result)
         raise self.retry(exc=exc)
