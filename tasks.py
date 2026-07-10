@@ -102,21 +102,37 @@ def scan_task(self, job_id, url, filename=None, webhook_url=None, metadata=None)
         )
         response.raise_for_status()
 
-        content_length = response.headers.get("Content-Length")
-        if content_length and int(content_length) > settings.max_url_size:
+        # Size guard, defence in depth: trust the Content-Length header for a
+        # cheap up-front reject, then also cap the bytes actually written — a
+        # missing, malformed or understated header must not let an unbounded
+        # body fill the scan volume.
+        declared = response.headers.get("Content-Length")
+        try:
+            declared = int(declared) if declared else None
+        except ValueError:
+            declared = None
+        if declared and declared > settings.max_url_size:
             response.close()
             result.update(
                 status="error",
                 error_kind="file",
-                error=f"file_too_large: {content_length} bytes exceeds "
+                error=f"file_too_large: {declared} bytes exceeds "
                 f"{settings.max_url_size} limit",
             )
             if webhook_url:
                 _send_webhook(webhook_url, result)
             return
 
+        written = 0
         with open(file_path, "wb") as f:
             for chunk in response.iter_content(chunk_size=8192):
+                written += len(chunk)
+                if written > settings.max_url_size:
+                    raise ScanError(
+                        f"file_too_large: streamed over {settings.max_url_size} "
+                        "bytes (Content-Length missing or understated)",
+                        kind="file",
+                    )
                 f.write(chunk)
 
         start_time = timeit.default_timer()
@@ -167,13 +183,18 @@ def scan_task(self, job_id, url, filename=None, webhook_url=None, metadata=None)
             result.update(status="error", error_kind="transient", error=str(exc))
             if webhook_url:
                 _send_webhook(webhook_url, result)
+            return
         raise self.retry(exc=exc)
 
     except http_requests.RequestException as exc:
+        # Download failures report at once rather than retrying: the URL is
+        # frozen in the task args, so a stale/expired presigned URL wouldn't
+        # recover on retry — the caller re-submits with a fresh URL. Marked
+        # transient precisely so that caller (reaper / user retry) does so.
+        logger.error(f"Job {job_id} download failed: {exc}")
         result.update(
             status="error", error_kind="transient", error=f"download_failed: {exc}"
         )
-        logger.error(f"Job {job_id} download failed: {exc}")
         if webhook_url:
             _send_webhook(webhook_url, result)
 
@@ -187,6 +208,7 @@ def scan_task(self, job_id, url, filename=None, webhook_url=None, metadata=None)
             )
             if webhook_url:
                 _send_webhook(webhook_url, result)
+            return
         raise self.retry(exc=exc)
 
     except Exception as exc:
@@ -195,6 +217,7 @@ def scan_task(self, job_id, url, filename=None, webhook_url=None, metadata=None)
             result.update(status="error", error_kind="transient", error=str(exc))
             if webhook_url:
                 _send_webhook(webhook_url, result)
+            return
         raise self.retry(exc=exc)
 
     finally:

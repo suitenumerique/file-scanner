@@ -217,7 +217,7 @@ class ScanTaskClassificationTest(unittest.TestCase):
     def tearDownClass(cls):
         tasks.celery_app.conf.task_always_eager = cls._eager
 
-    def _run(self, scan=None, get=None, content_length=None):
+    def _run(self, scan=None, get=None, content_length=None, chunks=None):
         """Run scan_task with the download + clamd boundaries stubbed and the
         webhook captured. Returns the list of payloads pushed to the webhook."""
         sent = []
@@ -230,7 +230,7 @@ class ScanTaskClassificationTest(unittest.TestCase):
         response.headers = (
             {"Content-Length": str(content_length)} if content_length else {}
         )
-        response.iter_content.return_value = [b"data"]
+        response.iter_content.return_value = chunks if chunks is not None else [b"data"]
 
         with mock.patch.object(tasks, "_send_webhook", side_effect=_capture), \
             mock.patch.object(
@@ -285,6 +285,24 @@ class ScanTaskClassificationTest(unittest.TestCase):
         self.assertEqual(len(sent), 1)
         self.assertEqual(sent[0]["status"], "error")
         self.assertEqual(sent[0]["error_kind"], "file")
+
+    def test_unbounded_body_capped_as_file(self):
+        # No Content-Length header, but the streamed body exceeds the cap: the
+        # byte-counting guard rejects it as a file error instead of writing an
+        # unbounded body to disk.
+        with mock.patch.object(tasks.settings, "max_url_size", 8):
+            sent = self._run(chunks=[b"x" * 20])
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(sent[0]["status"], "error")
+        self.assertEqual(sent[0]["error_kind"], "file")
+
+    def test_malformed_content_length_ignored(self):
+        # A non-numeric Content-Length must not crash the task; it's treated as
+        # absent and the (small) body scans normally.
+        sent = self._run(content_length="not-a-number")
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(sent[0]["status"], "done")
+        self.assertNotIn("error_kind", sent[0])
 
     def test_download_failure_is_transient(self):
         def _boom(*_a, **_k):
