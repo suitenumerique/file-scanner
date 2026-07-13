@@ -132,8 +132,8 @@ client-examples/   sample files (EICAR, protected archive, macro) and a curl exa
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). Commits follow the
-[gitmoji](https://gitmoji.dev/) convention, and [CHANGELOG.md](CHANGELOG.md)
-tracks changes. Report vulnerabilities per [SECURITY.md](SECURITY.md).
+[gitmoji](https://gitmoji.dev/) convention. Report vulnerabilities per
+[SECURITY.md](SECURITY.md).
 
 ## Credits
 

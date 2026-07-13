@@ -9,7 +9,7 @@ from fastapi import Depends, FastAPI, File, HTTPException, Query, Response, Uplo
 from fastapi.responses import PlainTextResponse
 from fastapi.security import APIKeyHeader
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
-from pydantic import BaseModel, HttpUrl
+from pydantic import BaseModel, Field, HttpUrl
 
 from config import get_settings
 from metrics import refresh_signatures
@@ -71,6 +71,21 @@ def _resolve(
         raise HTTPException(400, detail=str(exc)) from exc
 
 
+class ScanEncryption(BaseModel):
+    """Decryption material for a client-encrypted source. Without it a scanner
+    sees opaque bytes and reports them clean, so an encrypting caller must send
+    it. Held in memory for the scan only — never persisted or logged.
+    """
+
+    # URL-safe base64 AES-256 key (43 chars unpadded, 44 padded).
+    key: str = Field(min_length=43, max_length=44)
+    # Plaintext bytes per crypto chunk; each stored chunk is this + 28 bytes
+    # (12-byte IV + 16-byte GCM tag), the last one shorter.
+    chunk_size: int = Field(gt=0)
+    # AAD prefix: each chunk is bound to f"{file_id}:{part_number}" (1-based).
+    file_id: str = Field(min_length=1, max_length=255)
+
+
 class ScanAsyncRequest(BaseModel):
     url: HttpUrl
     filename: str | None = None
@@ -80,6 +95,8 @@ class ScanAsyncRequest(BaseModel):
     # DEFAULT_CATEGORIES.
     categories: list[str] | None = None
     scanners: list[str] | None = None
+    # Present when the source is client-encrypted: decrypt before scanning.
+    encryption: ScanEncryption | None = None
 
 
 # --- App ---
@@ -215,8 +232,18 @@ def scan_async(
     # precludes a future API persisting the job and letting callers poll it by id.
     job_id = str(uuid.uuid4())
     scan_task.send(
-        job_id, url_str, names, body.filename, body.webhook_url, body.metadata, username
+        job_id,
+        url_str,
+        names,
+        body.filename,
+        body.webhook_url,
+        body.metadata,
+        username,
+        body.encryption.model_dump() if body.encryption else None,
     )
 
-    logger.info(f"Async scan job {job_id} created by {username} for {url_str}")
+    logger.info(
+        f"Async scan job {job_id} created by {username} for {url_str} "
+        f"(encrypted={body.encryption is not None})"
+    )
     return {"job_id": job_id, "status": "pending"}

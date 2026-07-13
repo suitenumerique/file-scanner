@@ -1,11 +1,15 @@
 """Async /api/v1.0/scan-async endpoint (+ the /v2/scan-async alias transfers uses)
 and the dramatiq worker task's verdict/error reporting."""
 
+import base64
+import os
 from unittest import mock
 
 import clamd
 import pytest
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
+import encryption
 import tasks
 from app import settings
 from tasks import scan_task
@@ -90,6 +94,32 @@ def test_rejects_unknown_category(client, auth):
     assert r.status_code == 400
 
 
+def test_creates_job_with_encryption(client, auth):
+    r = client.post(
+        ASYNC_URL,
+        json={
+            "url": "http://example.com/f.pdf",
+            "webhook_url": "http://callback.example.com/av",
+            "encryption": {"key": "A" * 43, "chunk_size": 65536, "file_id": "abc"},
+        },
+        headers=auth,
+    )
+    assert r.status_code == 202
+
+
+def test_rejects_bad_encryption_key_length(client, auth):
+    r = client.post(
+        ASYNC_URL,
+        json={
+            "url": "http://example.com/f.pdf",
+            "webhook_url": "http://callback.example.com/av",
+            "encryption": {"key": "tooshort", "chunk_size": 65536, "file_id": "abc"},
+        },
+        headers=auth,
+    )
+    assert r.status_code == 422
+
+
 def test_v2_async_alias(client, auth):
     # transfers posts to the /v2/scan-async alias.
     r = client.post(
@@ -137,6 +167,8 @@ def run_task(clamav):
         content_length=None,
         chunks=None,
         scanners=("clamav",),
+        encryption_params=None,
+        scanned=None,
     ):
         sent = []
 
@@ -151,8 +183,17 @@ def run_task(clamav):
         response.iter_content.return_value = chunks if chunks is not None else [b"data"]
 
         cd = mock.MagicMock()
-        cd.instream.side_effect = instream
-        cd.instream.return_value = None if instream else {"stream": verdict}
+        if instream is not None:
+            cd.instream.side_effect = instream
+        elif scanned is not None:
+            # Record the bytes handed to the scanner (to prove decryption).
+            def _capture_scan(fh):
+                scanned.append(fh.read())
+                return {"stream": verdict}
+
+            cd.instream.side_effect = _capture_scan
+        else:
+            cd.instream.return_value = {"stream": verdict}
 
         with (
             mock.patch.object(tasks, "_send_webhook", side_effect=_capture),
@@ -171,6 +212,8 @@ def run_task(clamav):
                 "f.bin",
                 "http://cb/av",
                 None,
+                "",
+                encryption_params,
             )
         return sent
 
@@ -246,3 +289,89 @@ def test_task_download_failure_is_transient(run_task):
 
     (sent,) = run_task(get=_boom)
     assert sent["error_kind"] == "transient"
+
+
+# --- client-encrypted sources (decrypt before scanning) ---
+
+_KEY = b"\x11" * 32
+_KEY_FRAGMENT = base64.urlsafe_b64encode(_KEY).decode().rstrip("=")  # 43 chars
+_FILE_ID = "file-abc"
+_CHUNK = 64
+
+
+def _encrypt(plaintext, key=_KEY, file_id=_FILE_ID, chunk_size=_CHUNK):
+    """Build the ciphertext stream the caller sends: one crypto chunk per
+    ``chunk_size`` of plaintext, each ``IV || ciphertext || tag`` and bound to
+    ``f"{file_id}:{part}"`` (1-based)."""
+    parts = []
+    for part, i in enumerate(range(0, len(plaintext), chunk_size), start=1):
+        iv = os.urandom(encryption.IV_BYTES)
+        aad = f"{file_id}:{part}".encode()
+        parts.append(iv + AESGCM(key).encrypt(iv, plaintext[i : i + chunk_size], aad))
+    return b"".join(parts)
+
+
+def _params(key_fragment=_KEY_FRAGMENT, chunk_size=_CHUNK, file_id=_FILE_ID):
+    return {"key": key_fragment, "chunk_size": chunk_size, "file_id": file_id}
+
+
+def test_task_decrypts_before_scan(run_task):
+    plaintext = b"NOT A VIRUS, just secret bytes.\n"
+    scanned = []
+    (sent,) = run_task(
+        chunks=[_encrypt(plaintext)], encryption_params=_params(), scanned=scanned
+    )
+    assert sent["malware"] is False
+    assert scanned == [plaintext]  # the scanner saw plaintext, not ciphertext
+
+
+def test_task_decrypts_multi_chunk_with_short_tail(run_task):
+    plaintext = b"A" * (2 * _CHUNK + 5)  # two full chunks + a short tail
+    scanned = []
+    (sent,) = run_task(
+        chunks=[_encrypt(plaintext)], encryption_params=_params(), scanned=scanned
+    )
+    assert scanned == [plaintext]
+    assert sent["malware"] is False
+
+
+def test_task_decrypt_wire_chunking_is_irrelevant(run_task):
+    plaintext = b"reassembled across arbitrary wire boundaries " * 4
+    wire = _encrypt(plaintext)
+    pieces = [wire[i : i + 7] for i in range(0, len(wire), 7)]  # tiny 7-byte reads
+    scanned = []
+    (sent,) = run_task(chunks=pieces, encryption_params=_params(), scanned=scanned)
+    assert scanned == [plaintext]
+    assert sent["malware"] is False
+
+
+def test_task_infected_plaintext_is_reported(run_task):
+    (sent,) = run_task(
+        verdict=("FOUND", "Eicar-Test-Signature"),
+        chunks=[_encrypt(b"whatever")],
+        encryption_params=_params(),
+    )
+    assert sent["malware"] is True
+
+
+def test_task_wrong_key_is_file_error(run_task):
+    wrong = base64.urlsafe_b64encode(b"\x22" * 32).decode().rstrip("=")
+    (sent,) = run_task(
+        chunks=[_encrypt(b"secret")], encryption_params=_params(key_fragment=wrong)
+    )
+    assert sent["error_kind"] == "file"
+    assert sent["error"].startswith("decryption_failed:")
+
+
+def test_task_malformed_key_is_file_error(run_task):
+    (sent,) = run_task(
+        chunks=[_encrypt(b"secret")],
+        encryption_params=_params(key_fragment="not-url-safe+/"),
+    )
+    assert sent["error_kind"] == "file"
+
+
+def test_task_truncated_ciphertext_is_file_error(run_task):
+    wire = _encrypt(b"a long enough secret payload to truncate")[:-5]
+    (sent,) = run_task(chunks=[wire], encryption_params=_params())
+    assert sent["error_kind"] == "file"
