@@ -1,11 +1,19 @@
+import socket
 import unittest
 from unittest import mock
 
 import clamd
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 import tasks
-from clamav_rest import app, cd, settings
+from clamav_rest import (
+    _resolves_to_public_only,
+    _validate_url,
+    app,
+    cd,
+    settings,
+)
 from clamav_versions import parse_local_version, parse_remote_version
 from config import TEST_API_KEY
 from tasks import _clamd_error_kind, scan_task
@@ -319,6 +327,127 @@ class ScanTaskClassificationTest(unittest.TestCase):
         sent = self._run(scan=_boom)
         self.assertEqual(len(sent), 1)
         self.assertEqual(sent[0]["error_kind"], "transient")
+
+
+def _gai(*ips):
+    """Build a socket.getaddrinfo-shaped return value for the given IPs."""
+    return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (ip, 0)) for ip in ips]
+
+
+class ResolvesToPublicOnlyTest(unittest.TestCase):
+    """`_resolves_to_public_only` is the SSRF core: it returns False as soon as
+    any A/AAAA record points at non-public space, and fails open (True) only
+    when the name doesn't resolve at all."""
+
+    def _resolves(self, *ips):
+        with mock.patch("clamav_rest.socket.getaddrinfo", return_value=_gai(*ips)):
+            return _resolves_to_public_only("host.example.com")
+
+    def test_public_is_allowed(self):
+        self.assertTrue(self._resolves("93.184.216.34"))
+
+    def test_non_public_is_rejected(self):
+        for ip in (
+            "127.0.0.1",        # loopback
+            "10.0.0.1",         # RFC1918
+            "192.168.1.1",      # RFC1918
+            "172.16.0.1",       # RFC1918
+            "169.254.169.254",  # link-local: cloud metadata endpoint
+            "0.0.0.0",          # unspecified
+            "224.0.0.1",        # multicast
+            "240.0.0.1",        # reserved
+            "::1",              # IPv6 loopback
+            "fd00::1",          # IPv6 unique-local
+        ):
+            self.assertFalse(self._resolves(ip), ip)
+
+    def test_any_non_public_record_rejects(self):
+        # A hostname that resolves to both a public and a private address must
+        # be rejected — a DNS-rebinding style trick can't slip through.
+        self.assertFalse(self._resolves("93.184.216.34", "10.0.0.1"))
+
+    def test_unresolvable_fails_open(self):
+        # By design: let the download surface a clear network error rather than
+        # a misleading 400.
+        with mock.patch(
+            "clamav_rest.socket.getaddrinfo", side_effect=socket.gaierror
+        ):
+            self.assertTrue(_resolves_to_public_only("does-not-exist.invalid"))
+
+
+class ValidateUrlTest(unittest.TestCase):
+    """`_validate_url` wires the SSRF guard into request handling. The guard is
+    only active when `settings.testing` is False, so we flip it here."""
+
+    def setUp(self):
+        self._testing = settings.testing
+        settings.testing = False
+
+    def tearDown(self):
+        settings.testing = self._testing
+
+    def test_missing_hostname_is_rejected(self):
+        # Independent of the testing flag, but cheap to assert here.
+        with self.assertRaises(HTTPException) as ctx:
+            _validate_url("not-a-url")
+        self.assertEqual(ctx.exception.status_code, 400)
+
+    def test_public_host_passes(self):
+        with mock.patch(
+            "clamav_rest.socket.getaddrinfo", return_value=_gai("93.184.216.34")
+        ):
+            _validate_url("https://example.com/f.pdf")  # no raise
+
+    def test_non_public_host_is_rejected(self):
+        with mock.patch(
+            "clamav_rest.socket.getaddrinfo", return_value=_gai("169.254.169.254")
+        ):
+            with self.assertRaises(HTTPException) as ctx:
+                _validate_url("http://metadata.internal/latest/meta-data")
+        self.assertEqual(ctx.exception.status_code, 400)
+        self.assertIn("non-public", ctx.exception.detail)
+
+    def test_guard_skipped_when_testing(self):
+        # With testing back on, even a metadata IP passes _validate_url — the
+        # guard is deliberately inert in the test/CI configs.
+        settings.testing = True
+        with mock.patch(
+            "clamav_rest.socket.getaddrinfo", return_value=_gai("169.254.169.254")
+        ):
+            _validate_url("http://metadata.internal/x")  # no raise
+
+
+class ScanAsyncSsrfTest(unittest.TestCase):
+    """End-to-end: a URL resolving to a non-public address is refused with 400
+    at the /v2/scan-async boundary when the guard is active."""
+
+    def setUp(self):
+        self._testing = settings.testing
+        settings.testing = False
+
+    def tearDown(self):
+        settings.testing = self._testing
+
+    # These patch `_resolves_to_public_only` (already covered end-to-end by
+    # ResolvesToPublicOnlyTest) rather than socket.getaddrinfo: the latter is
+    # process-global, so a mocked resolver would also hijack the Celery broker
+    # connection that a 202 triggers via scan_task.delay().
+    def test_metadata_url_rejected(self):
+        with mock.patch("clamav_rest._resolves_to_public_only", return_value=False):
+            r = client.post("/v2/scan-async", json={
+                "url": "http://metadata.example.com/latest/meta-data",
+                "webhook_url": "http://callback.example.com/av",
+            }, headers=AUTH)
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("non-public", r.json()["detail"])
+
+    def test_public_url_accepted(self):
+        with mock.patch("clamav_rest._resolves_to_public_only", return_value=True):
+            r = client.post("/v2/scan-async", json={
+                "url": "http://example.com/f.pdf",
+                "webhook_url": "http://callback.example.com/av",
+            }, headers=AUTH)
+        self.assertEqual(r.status_code, 202)
 
 
 if __name__ == "__main__":

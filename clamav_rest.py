@@ -1,4 +1,6 @@
+import ipaddress
 import logging
+import socket
 import timeit
 import uuid
 from typing import Annotated, Optional
@@ -46,6 +48,12 @@ for entry in settings.api_keys.split(","):
         name, key = entry.split(":", 1)
         API_KEYS[key] = name
 
+if not API_KEYS:
+    logger.warning(
+        "No API keys configured — every request will return 401. "
+        "Set API_KEYS as a comma-separated list of name:key pairs."
+    )
+
 api_key_header = APIKeyHeader(name="X-API-Key")
 
 
@@ -73,12 +81,46 @@ class ScanAsyncRequest(BaseModel):
 
 # --- Helpers ---
 
+def _resolves_to_public_only(hostname: str) -> bool:
+    """Reject hostnames whose A/AAAA records point at non-public ranges.
+
+    Defense against SSRF: a caller-supplied URL must not let the worker reach
+    loopback, link-local, or RFC1918 space (e.g. cloud metadata endpoints).
+    Unresolvable hostnames are allowed through so the download surfaces a
+    clear network error instead of a misleading 400.
+    """
+    try:
+        infos = socket.getaddrinfo(hostname, None)
+    except socket.gaierror:
+        return True
+    for info in infos:
+        ip = ipaddress.ip_address(info[4][0])
+        if (
+            ip.is_private
+            or ip.is_loopback
+            or ip.is_link_local
+            or ip.is_reserved
+            or ip.is_multicast
+            or ip.is_unspecified
+        ):
+            return False
+    return True
+
+
 def _validate_url(url: str):
+    parsed = urlparse(url)
+    if not parsed.hostname:
+        raise HTTPException(400, detail="invalid URL")
+
     if settings.allowed_url_hosts:
-        parsed = urlparse(url)
         hosts = [h.strip() for h in settings.allowed_url_hosts.split(",") if h.strip()]
         if hosts and parsed.hostname not in hosts:
             raise HTTPException(400, detail=f"host {parsed.hostname} not allowed")
+
+    if not settings.testing and not _resolves_to_public_only(parsed.hostname):
+        raise HTTPException(
+            400, detail=f"host {parsed.hostname} resolves to a non-public address"
+        )
 
 
 # --- App ---
@@ -129,8 +171,9 @@ def scan_v2(
     try:
         result = cd.instream(file.file)
         status, reason = result["stream"]
-    except Exception as e:
-        raise HTTPException(500, detail=str(e))
+    except Exception:
+        logger.exception(f"scan failed for {file.filename}")
+        raise HTTPException(500, detail="scan failed")
     elapsed = timeit.default_timer() - start
     return ScanResult(malware=status != "OK", reason=reason if status != "OK" else None, time=elapsed)
 

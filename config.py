@@ -65,4 +65,9 @@ CONFIGS = {
 
 def get_settings() -> Settings:
     config_name = os.environ.get("APP_CONFIG", "config.ProductionConfig")
-    return CONFIGS.get(config_name, Settings())
+    try:
+        return CONFIGS[config_name]
+    except KeyError:
+        raise RuntimeError(
+            f"Unknown APP_CONFIG {config_name!r}; expected one of {list(CONFIGS)}"
+        )
