@@ -46,7 +46,10 @@ each scanner's result:
 - **Per-scanner `kind`** is one of `clean`, `malware` (`reason` = signature),
   `flagged` (scored hit; `reason` = label, `score` = confidence), `unscannable`
   (`reason` = tag, e.g. `PASSWORD-PROTECTED` — could not be fully scanned,
-  **not** clean), or `error` (transient failure to run that scanner).
+  **not** clean), or `error` (transient failure to run that scanner). A `malware`
+  result may also carry **`location`** — the inner path of the matched member
+  within a container (`report.zip/payload.exe`) — when the backend reports it
+  (exav); it's omitted otherwise.
 - The scanners run **in parallel**. Aggregation within an axis is strict: the
   file is only clean on that axis if *every* scanner scanned it and found nothing.
 

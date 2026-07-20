@@ -1,3 +1,4 @@
+import contextlib
 import logging
 import os
 import time
@@ -120,9 +121,13 @@ def _check_limits(read_bytes, download_start):
 
 
 def _write_plaintext(response, file_path, download_start):
-    """Stream the body straight to disk, bounded by the size + time budgets."""
+    """Stream the body straight to disk, bounded by the size + time budgets.
+
+    ``closing(response)`` releases the pooled connection even when a limit trips
+    mid-stream (the body isn't fully read).
+    """
     read = 0
-    with open(file_path, "wb") as f:
+    with contextlib.closing(response), open(file_path, "wb") as f:
         for chunk in response.iter_content(chunk_size=8192):
             read += len(chunk)
             _check_limits(read, download_start)
@@ -145,9 +150,10 @@ def _write_decrypted(response, file_path, download_start, enc):
         parts = int(enc["parts"])
     except (KeyError, TypeError, ValueError) as exc:
         raise encryption.DecryptionError(f"invalid encryption params: {exc}") from exc
-    if not 0 < chunk_size <= encryption.MAX_CHUNK_SIZE:
+    if not encryption.MIN_CHUNK_SIZE <= chunk_size <= encryption.MAX_CHUNK_SIZE:
         raise encryption.DecryptionError(
-            f"chunk_size {chunk_size} out of range (1..{encryption.MAX_CHUNK_SIZE})"
+            f"chunk_size {chunk_size} out of range "
+            f"({encryption.MIN_CHUNK_SIZE}..{encryption.MAX_CHUNK_SIZE})"
         )
     if parts < 0:
         raise encryption.DecryptionError(f"invalid parts {parts}")
@@ -156,7 +162,7 @@ def _write_decrypted(response, file_path, download_start, enc):
     buffer = bytearray()
     part_number = 0
     read = 0
-    with open(file_path, "wb") as f:
+    with contextlib.closing(response), open(file_path, "wb") as f:
         for chunk in response.iter_content(chunk_size=8192):
             read += len(chunk)
             _check_limits(read, download_start)
@@ -205,9 +211,10 @@ def scan_task(
     only output is the webhook POST. The file is streamed to each scanner, so the
     worker needs no filesystem shared with the scanners.
 
-    ``encryption_params`` (``{key, chunk_size, file_id}``) marks the source as
-    client-encrypted: decrypt before scanning, since a scanner would otherwise
-    pronounce opaque ciphertext clean. Omit it and the body is scanned as-is.
+    ``encryption_params`` (``{scheme, key, chunk_size, file_id, parts}``) marks
+    the source as client-encrypted: decrypt before scanning, since a scanner would
+    otherwise pronounce opaque ciphertext clean. Omit it and the body is scanned
+    as-is.
     """
     file_path = None
     result = {"job_id": job_id, "filename": filename, "metadata": metadata}

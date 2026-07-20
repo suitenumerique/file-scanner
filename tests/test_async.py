@@ -144,6 +144,24 @@ def test_rejects_bad_encryption_key_length(client, auth):
     assert r.status_code == 422
 
 
+def test_rejects_too_small_chunk_size(client, auth):
+    r = client.post(
+        ASYNC_URL,
+        json={
+            "url": "http://example.com/f.pdf",
+            "webhook_url": "http://callback.example.com/av",
+            "encryption": {
+                "key": "A" * 43,
+                "chunk_size": 1,
+                "file_id": "abc",
+                "parts": 1,
+            },
+        },
+        headers=auth,
+    )
+    assert r.status_code == 422
+
+
 def test_v2_async_alias(client, auth):
     # transfers posts to the /v2/scan-async alias.
     r = client.post(
@@ -320,7 +338,7 @@ def test_task_download_failure_is_transient(run_task):
 _KEY = b"\x11" * 32
 _KEY_FRAGMENT = base64.urlsafe_b64encode(_KEY).decode().rstrip("=")  # 43 chars
 _FILE_ID = "file-abc"
-_CHUNK = 64
+_CHUNK = 4096  # >= encryption.MIN_CHUNK_SIZE
 
 
 def _nparts(plaintext, chunk_size=_CHUNK):
@@ -374,7 +392,7 @@ def test_task_decrypts_multi_chunk_with_short_tail(run_task):
 
 
 def test_task_decrypt_wire_chunking_is_irrelevant(run_task):
-    plaintext = b"reassembled across arbitrary wire boundaries " * 4
+    plaintext = b"reassembled across arbitrary wire boundaries " * 200  # multi-chunk
     wire = _encrypt(plaintext)
     pieces = [wire[i : i + 7] for i in range(0, len(wire), 7)]  # tiny 7-byte reads
     scanned = []

@@ -94,12 +94,17 @@ dev compose ships `drive:test-key-not-for-production`.
   it is destructive and unauthenticated, so `uvicorn app:app` serves it at
   **`/dashboard`** behind a mandatory Basic-auth + optional IP-allowlist guard
   (`src/dashboard.py`) — and only when `WORKER_DASHBOARD_PASSWORD` is set (unset ⇒
-  it isn't mounted; the path is `WORKER_DASHBOARD_PATH`). The dev compose enables
-  it at [http://localhost:8090/dashboard](http://localhost:8090/dashboard) (any
-  username / `dev-dashboard-password`). In production set a strong password,
-  restrict with `WORKER_DASHBOARD_ALLOWED_IPS` (or `WORKER_DASHBOARD_FORWARDED_IP_HEADER`
-  behind a trusted proxy) and/or a proxy, and keep the broker private
-  (`WORKER_BROKER_URL=redis://:PASSWORD@host:6379/0`, Redis bound internally).
+  it isn't mounted; the path is `WORKER_DASHBOARD_PATH`). It's **highly
+  sensitive** — it renders queued/dead-letter task **args**, which include the
+  source URL and, for encrypted sources, the **decryption key** — so treat access
+  as broker-equivalent. **Leaving `WORKER_DASHBOARD_PASSWORD` unset (the default)
+  disables it entirely** (no route, no code). The dev compose enables it at
+  [http://localhost:8090/dashboard](http://localhost:8090/dashboard) (any username
+  / `dev-dashboard-password`). In production set a strong password, restrict with
+  `WORKER_DASHBOARD_ALLOWED_IPS` (or `WORKER_DASHBOARD_FORWARDED_IP_HEADER` behind
+  a trusted proxy), purge the DLQ, and keep the broker private
+  (`WORKER_BROKER_URL=redis://:PASSWORD@host:6379/0`, Redis bound internally). See
+  [docs/deployment.md](docs/deployment.md#queue-dashboard).
 
 ## Repository layout
 

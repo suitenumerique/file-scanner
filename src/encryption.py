@@ -30,9 +30,12 @@ IV_BYTES = 12
 GCM_TAG_BYTES = 16
 KEY_BYTES = 32  # AES-256
 OVERHEAD_PER_CHUNK = IV_BYTES + GCM_TAG_BYTES
-# Upper bound on the plaintext bytes per chunk. The worker buffers up to one
-# whole chunk in memory before decrypting, so an unbounded chunk_size would let a
-# caller force the entire download into RAM (memory-DoS).
+# Bounds on the plaintext bytes per chunk. Upper: the worker buffers one whole
+# chunk in memory before decrypting, so an unbounded chunk_size forces the
+# download into RAM (memory-DoS). Lower: a tiny chunk_size inflates the chunk
+# count and per-chunk GCM overhead into a CPU-DoS (millions of one-byte
+# decryptions), so require a sensible floor.
+MIN_CHUNK_SIZE = 4096  # 4 KiB
 MAX_CHUNK_SIZE = 16 * 1024 * 1024  # 16 MiB
 
 # URL-safe base64 alphabet, optional padding. The key travels in a URL fragment

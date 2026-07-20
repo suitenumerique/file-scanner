@@ -93,9 +93,10 @@ class ScanEncryption(BaseModel):
     # URL-safe base64 AES-256 key (43 chars unpadded, 44 padded).
     key: str = Field(min_length=43, max_length=44, pattern=r"^[A-Za-z0-9_-]+={0,2}$")
     # Plaintext bytes per crypto chunk; each stored chunk is this + 28 bytes
-    # (12-byte IV + 16-byte GCM tag), the last one shorter. Capped so the worker
-    # can't be forced to buffer an unbounded chunk in memory.
-    chunk_size: int = Field(gt=0, le=encryption.MAX_CHUNK_SIZE)
+    # (12-byte IV + 16-byte GCM tag), the last one shorter. Bounded both ways: a
+    # ceiling so the worker can't be forced to buffer a huge chunk (memory), a
+    # floor so a tiny chunk_size can't inflate the chunk count (CPU).
+    chunk_size: int = Field(ge=encryption.MIN_CHUNK_SIZE, le=encryption.MAX_CHUNK_SIZE)
     # AAD prefix: each chunk is bound to f"{file_id}:{part}:{parts}".
     file_id: str = Field(min_length=1, max_length=255)
     # Total number of chunks; bound into every chunk's AAD to defeat trailing
@@ -132,6 +133,12 @@ class ScanAsyncRequest(BaseModel):
 async def lifespan(_app: FastAPI):
     # Fail fast at boot if the category/scanner configuration is inconsistent.
     validate_registry()
+    if not settings.prometheus_api_key:
+        logger.warning(
+            "PROMETHEUS_API_KEY is not set — /metrics is unauthenticated and its "
+            "api_client label exposes caller identities. Set it, or isolate "
+            "/metrics at the network layer."
+        )
     yield
 
 

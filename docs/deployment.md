@@ -163,15 +163,33 @@ upstream (flush / remove / requeue). This service serves it from the **web app**
 Locally the dev compose sets a password, so it's at
 `http://localhost:8090/dashboard` (any username / `dev-dashboard-password`).
 
+> ⚠️ **The dashboard is highly sensitive.** Beyond the destructive queue ops, it
+> renders each queued / delayed / **dead-lettered** message's task **arguments** —
+> which for a scan job include the source **URL** and, for a client-encrypted
+> source, the **decryption key** (`encryption_params`). A dead-lettered encrypted
+> job keeps its key visible until the message is requeued or deleted. Anyone who
+> can reach the dashboard can read those inputs and flush/replay the queue, so
+> treat access as equivalent to broker access. (It does **not** show scan
+> results — nothing is persisted.)
+
 Because it rides the **public web tier**, treat it as privileged: set a strong
-`WORKER_DASHBOARD_PASSWORD` and restrict access with `WORKER_DASHBOARD_ALLOWED_IPS`
-and/or a reverse proxy / network policy. The IP allowlist checks the **connecting
-peer**; behind a proxy the peer is the proxy, so set
-`WORKER_DASHBOARD_FORWARDED_IP_HEADER` (e.g. `X-Forwarded-For`) to trust the
-proxy's client-IP header instead — only when a trusted proxy overwrites it, since
-it is otherwise client-spoofable. To keep queue administration off the API tier
-entirely, leave `WORKER_DASHBOARD_PASSWORD` unset and run the dashboard elsewhere
-against the same broker.
+`WORKER_DASHBOARD_PASSWORD`, restrict access with `WORKER_DASHBOARD_ALLOWED_IPS`
+and/or a reverse proxy / network policy, and purge the dead-letter queue so keys
+don't linger. The IP allowlist checks the **connecting peer**; behind a proxy the
+peer is the proxy, so set `WORKER_DASHBOARD_FORWARDED_IP_HEADER` (e.g.
+`X-Forwarded-For`) to trust the proxy's client-IP header instead — only when a
+trusted proxy overwrites it, since it is otherwise client-spoofable.
+
+### Disabling it entirely
+
+`WORKER_DASHBOARD_PASSWORD` is the on/off switch. **Leave it unset (the default)
+and the dashboard is not served at all** — no `/dashboard` route is registered
+and `src/dashboard.py` (and the broker introspection it does) is never even
+imported; the app logs `Dashboard disabled` at startup. There is nothing to reach
+and no code path to exploit. Set the password only on a deployment where you
+actively need queue administration; to inspect the queue without exposing it on
+the API tier, keep it unset here and run the dashboard as a separate,
+network-restricted process against the same broker.
 
 ## Scaling
 

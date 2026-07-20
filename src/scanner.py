@@ -55,12 +55,15 @@ class Verdict:
       ``reason`` is a short tag (e.g. ``PASSWORD-PROTECTED``, ``UNSCANNABLE``).
 
     ``score`` is the raw confidence for a scored axis (0.0-1.0), ``None`` for a
-    discrete axis like malware.
+    discrete axis like malware. ``location`` is the inner path of the matched
+    member within a container (e.g. ``a.zip/dir/evil.exe``) when the backend can
+    report it (exav); ``None`` otherwise.
     """
 
     kind: str
     reason: str | None = None
     score: float | None = None
+    location: str | None = None
 
     @property
     def malware(self) -> bool:
@@ -139,6 +142,7 @@ class ScannerResult:
     kind: str
     reason: str | None = None
     score: float | None = None
+    location: str | None = None
     time: float = 0.0
     scored: bool = False
 
@@ -153,6 +157,8 @@ class ScannerResult:
             d["score"] = round(self.score, 4)
         if self.reason is not None:
             d["reason"] = self.reason
+        if self.location is not None:
+            d["location"] = self.location
         return d
 
 
@@ -191,8 +197,17 @@ class ScanReport:
         for cat in dict.fromkeys(r.category for r in self.results):
             rs = [r for r in self.results if r.category == cat]
             if any(r.scored for r in rs):
+                # Scored axis, mirroring the discrete precedence below: a
+                # detection (flagged) wins even if a sibling errored; otherwise an
+                # error makes the axis unknown (the available max may understate
+                # it); otherwise the max of the scores.
                 scores = [r.score for r in rs if r.score is not None]
-                out[cat] = max(scores) if scores else None
+                if any(r.kind == "flagged" for r in rs):
+                    out[cat] = max(scores)
+                elif any(r.kind == "error" for r in rs):
+                    out[cat] = None
+                else:
+                    out[cat] = max(scores) if scores else None
             elif any(r.kind == "malware" for r in rs):
                 out[cat] = True  # a detection wins outright
             elif any(r.kind == "error" for r in rs):
@@ -379,11 +394,12 @@ def run_scanners(names: list[str], open_file, api_client: str = "") -> ScanRepor
     def _one(name: str) -> ScannerResult:
         scanner = get_scanner(name)
         start = timeit.default_timer()
-        score = None
+        score = location = None
         try:
             with contextlib.closing(open_file()) as fh:
                 verdict = scanner.scan(fh)
-            kind, reason, score = verdict.kind, verdict.reason, verdict.score
+            kind, reason = verdict.kind, verdict.reason
+            score, location = verdict.score, verdict.location
         except ScannerError as exc:
             kind, reason = "error", str(exc)
         except Exception as exc:
@@ -398,6 +414,7 @@ def run_scanners(names: list[str], open_file, api_client: str = "") -> ScanRepor
             kind=kind,
             reason=reason,
             score=score,
+            location=location,
             time=timeit.default_timer() - start,
             scored=scanner.scored,
         )

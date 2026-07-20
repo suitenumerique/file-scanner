@@ -24,7 +24,7 @@ from scanners.clamav import (
     parse_local_version,
     parse_remote_version,
 )
-from scanners.exav import ExavScanner, unscannable_tag
+from scanners.exav import ExavScanner
 
 
 def _malware(scanner, kind, reason=None, **kw):
@@ -176,8 +176,17 @@ def test_report_as_dict_omits_null_reason():
     d = ScanReport([_malware("clamav", "clean", None, time=0.01)]).as_dict()
     assert d["malware"] is False
     assert "reason" not in d["scanners"][0]
+    assert "location" not in d["scanners"][0]
     assert d["scanners"][0]["scanner"] == "clamav"
     assert d["scanners"][0]["category"] == "malware"
+
+
+def test_report_surfaces_location():
+    d = ScanReport(
+        [ScannerResult("exav", "malware", "malware", "Sig", location="a.zip/e.exe")]
+    ).as_dict()
+    assert d["malware"] is True
+    assert d["scanners"][0]["location"] == "a.zip/e.exe"
 
 
 # --- per-category aggregation across axes ---
@@ -203,6 +212,29 @@ def test_report_scored_axis_null_when_no_score():
         [ScannerResult("nudenet", "nsfw", "error", "boom", scored=True)]
     )
     assert report.as_dict()["nsfw"] is None
+
+
+def test_report_scored_axis_none_on_partial_error():
+    # A scored scanner errored (no detection) → unknown, not the survivors' max
+    # (which could understate it) — mirrors the discrete malware axis.
+    report = ScanReport(
+        [
+            ScannerResult("nsfw1", "nsfw", "clean", score=0.2, scored=True),
+            ScannerResult("nsfw2", "nsfw", "error", "boom", scored=True),
+        ]
+    )
+    assert report.as_dict()["nsfw"] is None
+
+
+def test_report_scored_axis_detection_wins_over_error():
+    # A flagged detection stands even if a sibling errored (like malware=True).
+    report = ScanReport(
+        [
+            ScannerResult("nsfw1", "nsfw", "flagged", "porn", score=0.95, scored=True),
+            ScannerResult("nsfw2", "nsfw", "error", "boom", scored=True),
+        ]
+    )
+    assert report.as_dict()["nsfw"] == 0.95
 
 
 # --- ClamavScanner: raw INSTREAM reply -> Verdict ---
@@ -287,27 +319,69 @@ def test_exav_requires_hosts(monkeypatch):
 def test_exav_uses_its_own_pool_and_skips_version(monkeypatch):
     monkeypatch.setattr(scanner_mod.settings, "exav_hosts", "exav1:3310")
     sc = ExavScanner()
-    assert isinstance(sc, ClamavScanner)  # reuses INSTREAM / verdict handling
+    assert isinstance(sc, ClamavScanner)  # reuses the host-pool + ping plumbing
     assert sc._endpoints() == (None, [("exav1", 3310)])
     assert sc.version() is None
 
 
+# --- exav EXINSTREAM JSON verdict parsing ---
+
+
+def test_exav_parse_clean():
+    assert ExavScanner._parse_verdict('{"v":1,"verdict":"clean"}').kind == "clean"
+
+
+def test_exav_parse_malware_top_level():
+    v = ExavScanner._parse_verdict('{"v":1,"verdict":"malware","signature":"Eicar"}')
+    assert v.kind == "malware"
+    assert v.reason == "Eicar"
+    assert v.location is None
+
+
+def test_exav_parse_malware_with_location():
+    v = ExavScanner._parse_verdict(
+        '{"v":1,"verdict":"malware","signature":"Eicar","location":"a.zip/dir/e.exe"}'
+    )
+    assert v.reason == "Eicar"
+    assert v.location == "a.zip/dir/e.exe"
+
+
 @pytest.mark.parametrize(
-    "tag", ["LIMITS-EXCEEDED", "UNSCANNABLE", "PASSWORD-PROTECTED"]
+    "tag", ["PASSWORD-PROTECTED", "LIMITS-EXCEEDED", "UNSCANNABLE"]
 )
-def test_exav_error_tag_is_unscannable(monkeypatch, tag):
-    # exav (unlike the base) recognises its structured tags and preserves them.
-    monkeypatch.setattr(scanner_mod.settings, "exav_hosts", "exav1:3310")
-    v = ExavScanner()._error_verdict(tag)
+def test_exav_parse_unscannable(tag):
+    v = ExavScanner._parse_verdict(f'{{"v":1,"verdict":"unscannable","tag":"{tag}"}}')
     assert v.kind == "unscannable"
     assert v.reason == tag
 
 
-def test_exav_transient_tag_still_retries(monkeypatch):
-    # A bare transient token is infra, not a file tag → falls back to a retry.
-    monkeypatch.setattr(scanner_mod.settings, "exav_hosts", "exav1:3310")
+def test_exav_parse_error_raises():
+    with pytest.raises(ScannerError, match="oom"):
+        ExavScanner._parse_verdict('{"v":1,"verdict":"error","message":"oom"}')
+
+
+def test_exav_parse_unknown_command_raises():
+    with pytest.raises(ScannerError, match="EXINSTREAM"):
+        ExavScanner._parse_verdict("UNKNOWN COMMAND\n")
+
+
+@pytest.mark.parametrize("raw", ["not json", '{"v":1,"verdict":"weird"}'])
+def test_exav_parse_bad_reply_raises(raw):
     with pytest.raises(ScannerError):
-        ExavScanner()._error_verdict("TIMEOUT")
+        ExavScanner._parse_verdict(raw)
+
+
+def test_exav_scan_over_exinstream(monkeypatch):
+    # scan() streams over EXINSTREAM and maps the JSON reply, location included.
+    monkeypatch.setattr(scanner_mod.settings, "exav_hosts", "exav1:3310")
+    sc = ExavScanner()
+    reply = '{"v":1,"verdict":"malware","signature":"Eicar","location":"a.zip/e.exe"}'
+    with mock.patch.object(sc, "_client") as client:
+        client.return_value.exinstream.return_value = reply
+        v = sc.scan(b"data")
+    assert v.kind == "malware"
+    assert v.reason == "Eicar"
+    assert v.location == "a.zip/e.exe"
 
 
 def test_resolve_accepts_configured_exav(monkeypatch):
@@ -363,23 +437,3 @@ def test_run_scanners_isolates_a_backend_crash(monkeypatch):
     assert crash.kind == "error"
     assert "internal error" in crash.reason
     assert ok.kind == "clean"  # sibling still ran
-
-
-# --- unscannable_tag ---
-
-
-@pytest.mark.parametrize(
-    "reason,expected",
-    [
-        ("LIMITS-EXCEEDED", "LIMITS-EXCEEDED"),
-        ("UNSCANNABLE", "UNSCANNABLE"),
-        ("TRUNCATED-STREAM", "TRUNCATED-STREAM"),  # future exav code, surfaced verbatim
-        ("TIMEOUT", None),  # bare transient token is not a tag
-        ("Can't allocate memory", None),
-        ("Encrypted.PDF", None),
-        ("", None),
-        (None, None),
-    ],
-)
-def test_unscannable_tag(reason, expected):
-    assert unscannable_tag(reason) == expected

@@ -1,23 +1,27 @@
 # Architecture
 
-The service is a thin REST/queue layer in front of a clamd-protocol scanning
-daemon.
+The service is a thin REST/queue layer in front of one or more **pluggable
+scanner backends**. A file is scanned across one or more **categories** (axes of
+judgment, e.g. `malware`); each backend feeds a category and returns a normalized
+`Verdict`, so nothing above `scanners/` knows the engine. Built-in backends are
+`clamav`/`exav` (the clamd wire protocol) and `jcop` (an HTTP analyser), and the
+interface is engine-agnostic — a category need not even be antivirus.
 
 ```text
-             ┌───────────────┐   INSTREAM    ┌──────────────────┐
-  client ──▶ │  FastAPI web  │ ────────────▶ │  clamd  /  exav  │
-             │  (uvicorn)    │               └──────────────────┘
-             └──────┬────────┘                        ▲
-                    │ scan-async                      │ INSTREAM
-                    ▼                                 │
-             ┌───────────────┐   task    ┌────────────┴─────┐
+             ┌───────────────┐    scan     ┌──────────────────────────┐
+  client ──▶ │  FastAPI web  │ ──────────▶ │  scanner backends        │
+             │  (uvicorn)    │             │  clamav/exav (INSTREAM)  │
+             └──────┬────────┘             │  jcop (HTTP), …          │
+                    │ scan-async           └──────────────────────────┘
+                    ▼                                  ▲
+             ┌───────────────┐   task    ┌─────────────┴────┐
              │  Redis broker │ ────────▶ │ dramatiq worker  │ ──▶ webhook
              └───────────────┘           └──────────────────┘
 ```
 
-Both the sync endpoint and the worker scan over **INSTREAM** (the file is
-streamed to clamd/exav over the socket), so the worker shares no filesystem with
-the scanner.
+The clamd-protocol backends (`clamav`/`exav`) scan over **INSTREAM** — the file
+is streamed to the daemon over the socket — so the worker shares no filesystem
+with them; other backends use their own transport (`jcop` submits over HTTP).
 
 ## Components
 
