@@ -10,23 +10,28 @@ from config import TEST_API_KEY
 from scanner import get_scanner
 
 
-def _clamav_reachable() -> bool:
+def _reachable(name: str) -> bool:
     try:
-        return get_scanner("clamav").ping()
+        return get_scanner(name).ping()
     except Exception:
         return False
 
 
 def pytest_collection_modifyitems(config, items):
-    """Auto-skip ``@pytest.mark.integration`` tests when no clamav daemon is
-    reachable, so a bare local ``pytest`` stays green; ``make test`` runs them
-    against the container. Checked once per session."""
-    if _clamav_reachable():
-        return
-    skip = pytest.mark.skip(reason="clamav daemon not reachable")
-    for item in items:
-        if "integration" in item.keywords:
-            item.add_marker(skip)
+    """Auto-skip scanner integration tests when their daemon isn't reachable, so
+    a bare local ``pytest`` stays green; ``make test`` runs them against the
+    container. ``@pytest.mark.integration`` → clamav; ``@pytest.mark.exav`` →
+    exav (also skipped when exav isn't configured). Reachability checked once."""
+    for marker, scanner, reason in (
+        ("integration", "clamav", "clamav daemon not reachable"),
+        ("exav", "exav", "exav daemon not configured/reachable"),
+    ):
+        if _reachable(scanner):
+            continue
+        skip = pytest.mark.skip(reason=reason)
+        for item in items:
+            if marker in item.keywords:
+                item.add_marker(skip)
 
 
 @pytest.fixture

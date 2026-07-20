@@ -24,6 +24,7 @@ COMPOSE_RUN_APP  = $(COMPOSE_RUN) app
 # RULES
 
 default: help
+.PHONY: default
 
 # -- Project
 
@@ -53,6 +54,10 @@ stop: ## stop the stack
 .PHONY: stop
 
 # -- Quality
+
+lock: ## rebuild uv.lock from pyproject.toml (run after changing dependencies)
+	@uv lock
+.PHONY: lock
 
 audit: ## scan dependencies for known vulnerabilities
 	@uv run pip-audit

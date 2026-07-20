@@ -40,7 +40,18 @@ class Settings:
 
     # --- Web server ---
     host: str = "0.0.0.0"  # interface uvicorn binds to
-    port: int = int(os.environ.get("PORT", "8090"))  # (PORT)
+    port: int = 8090  # web server port (PORT)
+
+    # --- Metrics ---
+    # If set, GET /metrics requires `Authorization: Bearer <key>` (constant-time
+    # compare; Prometheus sends it via bearer_token / authorization). Matches the
+    # PROMETHEUS_API_KEY convention in suitenumerique/messages. Empty (default)
+    # leaves /metrics open — ONLY safe when the endpoint is isolated at the network
+    # layer (private port, mTLS mesh, kube-rbac-proxy). The scan metrics carry an
+    # api_client label (caller identities + volumes), so set this on any
+    # deployment where /metrics is reachable from an untrusted network.
+    # (PROMETHEUS_API_KEY)
+    prometheus_api_key: str = ""
 
     # --- Scanner selection ---
     # JSON map of category -> [scanner names]: which categories (axes of
@@ -61,6 +72,10 @@ class Settings:
     clamav_txt_uri: str = "current.cvd.clamav.net"
     clamav_host: str = "localhost"  # single daemon hostname (CLAMAV_HOST)
     clamav_port: int = 3310  # single daemon TCP port (CLAMAV_PORT)
+    # Socket timeout (s) for a clamd connection, so an unreachable/hung daemon
+    # fails the scan instead of blocking a worker forever. Generous by default to
+    # not trip on a legitimately slow scan of a large file. (CLAMAV_TIMEOUT)
+    clamav_timeout: int = 300
     # Unix socket path; when set it takes precedence over host/port. (CLAMAV_SOCKET)
     clamav_socket: str = ""
     # Optional client-side balancing: a comma-separated list of ``host:port``
@@ -154,6 +169,8 @@ TEST_API_KEY = "test-key-not-for-production"
 def _production() -> Settings:
     """Production settings, fully driven by environment variables."""
     return Settings(
+        port=_int_env("PORT", 8090),
+        prometheus_api_key=os.environ.get("PROMETHEUS_API_KEY", ""),
         api_keys=os.environ.get("API_KEYS", ""),
         default_scanners=os.environ.get("DEFAULT_SCANNERS", '{"malware": ["clamav"]}'),
         default_categories=os.environ.get("DEFAULT_CATEGORIES", "malware"),
@@ -161,6 +178,7 @@ def _production() -> Settings:
         clamav_socket=os.environ.get("CLAMAV_SOCKET", ""),
         clamav_host=os.environ.get("CLAMAV_HOST", "clamav"),
         clamav_port=_int_env("CLAMAV_PORT", 3310),
+        clamav_timeout=_int_env("CLAMAV_TIMEOUT", 300),
         clamav_hosts=os.environ.get("CLAMAV_HOSTS", ""),
         exav_hosts=os.environ.get("EXAV_HOSTS", ""),
         jcop_base_url=os.environ.get("JCOP_BASE_URL", ""),
@@ -198,6 +216,9 @@ CONFIGS = {
         testing=True,
         worker_eager=True,
         clamav_host="clamav",
+        # Optional: point the exav backend at a running exav daemon to exercise
+        # the exav integration tests (they skip when it's unset/unreachable).
+        exav_hosts=os.environ.get("EXAV_HOSTS", ""),
         max_upload_size=4999999,
         max_url_size=4999999,
         api_keys=f"drive:{TEST_API_KEY}",
@@ -207,6 +228,7 @@ CONFIGS = {
         testing=True,
         worker_eager=True,
         clamav_host="localhost",
+        exav_hosts=os.environ.get("EXAV_HOSTS", ""),
         max_upload_size=4999999,
         max_url_size=4999999,
         api_keys=f"drive:{TEST_API_KEY}",

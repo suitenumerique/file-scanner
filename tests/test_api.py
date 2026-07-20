@@ -18,6 +18,19 @@ def test_metrics_endpoint(client):
     assert "filescanner_scans_total" in r.text
 
 
+def test_metrics_bearer_gate_when_key_set(client, monkeypatch):
+    # With PROMETHEUS_API_KEY set, /metrics requires the matching bearer token.
+    monkeypatch.setattr(settings, "prometheus_api_key", "s3cret")
+    assert client.get("/metrics").status_code == 401
+    assert (
+        client.get("/metrics", headers={"Authorization": "Bearer wrong"}).status_code
+        == 401
+    )
+    ok = client.get("/metrics", headers={"Authorization": "Bearer s3cret"})
+    assert ok.status_code == 200
+    assert "filescanner_scans_total" in ok.text
+
+
 def test_metrics_label_api_client(client, auth, clamav_cd):
     # A scan is attributed to the caller's API_KEYS name (here "drive").
     clamav_cd.instream.return_value = {"stream": ("OK", None)}
@@ -121,6 +134,35 @@ def test_payload_right_size(client, auth):
     r = client.post(SCAN_URL, files={"file": ("big.bin", content)}, headers=auth)
     assert r.status_code == 200
     assert r.json()["malware"] is False
+
+
+# --- exav backend (skipped unless an exav daemon is configured + reachable) ---
+
+
+@pytest.mark.exav
+def test_exav_eicar(client, auth, eicar, eicar_outputs):
+    r = client.post(
+        f"{SCAN_URL}?scanners=exav", files={"file": ("eicar.txt", eicar)}, headers=auth
+    )
+    assert r.status_code == 200
+    entry = r.json()["scanners"][0]
+    assert r.json()["malware"]
+    assert entry["scanner"] == "exav"
+    assert entry["category"] == "malware"
+    assert entry["reason"] in eicar_outputs
+
+
+@pytest.mark.exav
+def test_exav_clean(client, auth):
+    r = client.post(
+        f"{SCAN_URL}?scanners=exav",
+        files={"file": ("clean.txt", b"NO VIRUS")},
+        headers=auth,
+    )
+    assert r.status_code == 200
+    assert r.json()["malware"] is False
+    assert r.json()["scanners"][0]["scanner"] == "exav"
+    assert r.json()["scanners"][0]["kind"] == "clean"
 
 
 def test_payload_too_large(client, auth):

@@ -182,8 +182,10 @@ class ScanReport:
     def categories(self) -> dict:
         """Per-category aggregate, in first-seen order.
 
-        Scored axes → ``max`` of the available scores (``None`` if none); other
-        axes → ``any`` malware detection (bool).
+        Scored axes → ``max`` of the available scores (``None`` if none). A
+        discrete axis (malware) → ``True`` on any detection, ``False`` only when
+        every scanner ran and found nothing, ``None`` when a scanner errored (it
+        didn't complete, so the axis can't be asserted clean).
         """
         out: dict = {}
         for cat in dict.fromkeys(r.category for r in self.results):
@@ -191,8 +193,12 @@ class ScanReport:
             if any(r.scored for r in rs):
                 scores = [r.score for r in rs if r.score is not None]
                 out[cat] = max(scores) if scores else None
+            elif any(r.kind == "malware" for r in rs):
+                out[cat] = True  # a detection wins outright
+            elif any(r.kind == "error" for r in rs):
+                out[cat] = None  # a scanner didn't complete — can't assert clean
             else:
-                out[cat] = any(r.kind == "malware" for r in rs)
+                out[cat] = False
         return out
 
     def as_dict(self) -> dict:

@@ -87,10 +87,11 @@ class ClamavScanner(Scanner):
         """Build a fresh clamd client, picking a random host from the pool so a
         host list balances per scan (socket takes precedence)."""
         socket_path, hosts = self._endpoints()
+        timeout = settings.clamav_timeout
         if socket_path:
-            return clamd.ClamdUnixSocket(path=socket_path)
+            return clamd.ClamdUnixSocket(path=socket_path, timeout=timeout)
         host, port = random.choice(hosts)  # noqa: S311 — load balancing, not crypto
-        return clamd.ClamdNetworkSocket(host=host, port=port)
+        return clamd.ClamdNetworkSocket(host=host, port=port, timeout=timeout)
 
     def ping(self) -> bool:
         try:

@@ -5,12 +5,22 @@ import uuid
 from contextlib import asynccontextmanager
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, File, HTTPException, Query, Response, UploadFile
+from fastapi import (
+    Depends,
+    FastAPI,
+    File,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+    UploadFile,
+)
 from fastapi.responses import PlainTextResponse
 from fastapi.security import APIKeyHeader
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
-from pydantic import BaseModel, Field, HttpUrl
+from pydantic import BaseModel, Field, HttpUrl, field_validator
 
+import encryption
 from config import get_settings
 from metrics import refresh_signatures
 from scanner import get_scanner, resolve_scanners, run_scanners, validate_registry
@@ -74,16 +84,32 @@ def _resolve(
 class ScanEncryption(BaseModel):
     """Decryption material for a client-encrypted source. Without it a scanner
     sees opaque bytes and reports them clean, so an encrypting caller must send
-    it. Held in memory for the scan only — never persisted or logged.
+    it. Not persisted in the service or echoed to the webhook, but note the key
+    does transit the broker in the task message (see docs/client-encryption.md).
     """
 
+    # Wire-format identifier; omit for the default. Unknown schemes are rejected.
+    scheme: str = encryption.SCHEME
     # URL-safe base64 AES-256 key (43 chars unpadded, 44 padded).
-    key: str = Field(min_length=43, max_length=44)
+    key: str = Field(min_length=43, max_length=44, pattern=r"^[A-Za-z0-9_-]+={0,2}$")
     # Plaintext bytes per crypto chunk; each stored chunk is this + 28 bytes
-    # (12-byte IV + 16-byte GCM tag), the last one shorter.
-    chunk_size: int = Field(gt=0)
-    # AAD prefix: each chunk is bound to f"{file_id}:{part_number}" (1-based).
+    # (12-byte IV + 16-byte GCM tag), the last one shorter. Capped so the worker
+    # can't be forced to buffer an unbounded chunk in memory.
+    chunk_size: int = Field(gt=0, le=encryption.MAX_CHUNK_SIZE)
+    # AAD prefix: each chunk is bound to f"{file_id}:{part}:{parts}".
     file_id: str = Field(min_length=1, max_length=255)
+    # Total number of chunks; bound into every chunk's AAD to defeat trailing
+    # truncation.
+    parts: int = Field(ge=0)
+
+    @field_validator("scheme")
+    @classmethod
+    def _known_scheme(cls, value: str) -> str:
+        if value not in encryption.SCHEMES:
+            raise ValueError(
+                f"unknown scheme {value!r}; supported: {sorted(encryption.SCHEMES)}"
+            )
+        return value
 
 
 class ScanAsyncRequest(BaseModel):
@@ -143,8 +169,26 @@ def _mount_dashboard() -> None:
 _mount_dashboard()
 
 
+def verify_prometheus(request: Request) -> None:
+    """Bearer-token gate for /metrics (the PROMETHEUS_API_KEY convention from
+    suitenumerique/messages). Open when the key is unset — only safe if the
+    endpoint is isolated at the network layer, and note the scan metrics carry an
+    ``api_client`` label (caller identities + volumes)."""
+    key = settings.prometheus_api_key
+    if not key:
+        return
+    if not hmac.compare_digest(
+        request.headers.get("Authorization") or "", f"Bearer {key}"
+    ):
+        raise HTTPException(
+            status_code=401,
+            detail="Unauthorized",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+
 @app.get("/metrics")
-def metrics():
+def metrics(_: None = Depends(verify_prometheus)):
     """Prometheus exposition: default process metrics, scan counters, and the
     signature-freshness gauges (refreshed lazily here)."""
     try:

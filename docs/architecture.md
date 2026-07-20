@@ -3,7 +3,7 @@
 The service is a thin REST/queue layer in front of a clamd-protocol scanning
 daemon.
 
-```
+```text
              ┌───────────────┐   INSTREAM    ┌──────────────────┐
   client ──▶ │  FastAPI web  │ ────────────▶ │  clamd  /  exav  │
              │  (uvicorn)    │               └──────────────────┘

@@ -1,7 +1,7 @@
 [project]
-name = "clamav-service"
+name = "file-scanner"
 version = "1.0.0"
-description = "REST antivirus service (clamd / exav) for La Suite Numérique"
+description = "REST file-scanning service (clamav / exav / jcop) for La Suite Numérique"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.13"
@@ -103,4 +103,5 @@ python_files = ["test_*.py"]
 addopts = "-ra --cov=src --cov-report=term-missing"
 markers = [
     "integration: needs a live clamav daemon; auto-skipped when unreachable (run via `make test`)",
+    "exav: needs a live exav daemon (EXAV_HOSTS); auto-skipped when unset/unreachable",
 ]

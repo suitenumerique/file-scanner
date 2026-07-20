@@ -46,6 +46,7 @@ profile: `config.ProductionConfig` (default), `config.TestConfig`,
 | Variable | Default | Description |
 | --- | --- | --- |
 | `API_KEYS` | *(empty)* | Comma-separated `name:key` pairs. **Required** in production. |
+| `PROMETHEUS_API_KEY` | *(empty)* | If set, `/metrics` requires `Authorization: Bearer <key>`. Empty = open (isolate it at the network layer). |
 | `DEFAULT_SCANNERS` | `{"malware": ["clamav"]}` | JSON `category → [engines]` map: the categories that exist and which engines compose each. |
 | `DEFAULT_CATEGORIES` | `malware` | Comma-separated categories run when a request names neither `categories` nor `scanners`. Must be keys of `DEFAULT_SCANNERS`. |
 | `CLAMAV_HOST` | `clamav` | Single clamav daemon hostname. |
@@ -86,6 +87,14 @@ make test        # run the test suite in the app container (against clamav)
 Wait for `clamav` to finish loading its database before scanning
 (`docker compose logs -f clamav`).
 
+To also exercise the **exav** backend, bring up the opt-in `exav` service (it
+shares clamav's signature volume) before running the suite:
+
+```bash
+docker compose --profile exav up -d exav   # needs an exav image (see the compose comment)
+make test                                   # the exav-marked tests now run (they skip otherwise)
+```
+
 ### Without Docker
 
 ```bash
@@ -125,13 +134,18 @@ counters (`filescanner_scans_total{scanner,category,verdict,api_client}`,
 `filescanner_scan_duration_seconds{scanner,api_client}`), and signature freshness
 (`filescanner_signature_outdated{scanner}`,
 `filescanner_signature_version{scanner}`, refreshed lazily on scrape, 300 s TTL).
-It is **unauthenticated by design** (a scrape target): restrict it at the
-ingress / network (path allowlist, a dedicated metrics port the public ingress
-doesn't route, `kube-rbac-proxy`, or mTLS) — never expose it publicly. Sync
-scans are counted in the web process; the worker process counts async scans, so
-scrape it too (or use `PROMETHEUS_MULTIPROC_DIR`). Keep each scanner's own
-updater (`freshclam` / exav's reload) running. The `api_client` label is the
-`API_KEYS` name of the calling service, so scans can be broken down per consumer.
+Set **`PROMETHEUS_API_KEY`** to require `Authorization: Bearer <key>` on
+`/metrics` (constant-time; Prometheus sends it via `bearer_token`/`authorization`
+in the scrape config) — matching the convention in suitenumerique/messages. Left
+unset, `/metrics` is **open**, which is only safe when the endpoint is isolated
+at the network layer (a dedicated metrics port the public ingress doesn't route,
+`kube-rbac-proxy`, or mTLS). This matters here because the `api_client` label is
+the `API_KEYS` name of the calling service — caller identities and their scan
+volumes — so **set `PROMETHEUS_API_KEY` on any deployment where `/metrics` is
+reachable from an untrusted network**. Sync scans are counted in the web process;
+the worker process counts async scans, so scrape it too (or use
+`PROMETHEUS_MULTIPROC_DIR`). Keep each scanner's own updater (`freshclam` /
+exav's reload) running.
 
 ## Queue dashboard
 

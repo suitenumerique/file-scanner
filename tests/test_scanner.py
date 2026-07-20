@@ -162,6 +162,16 @@ def test_report_partial_error_is_not_all_errored():
     assert not report.malware
 
 
+def test_report_partial_error_axis_is_unknown():
+    # One scanner clean, one errored → the axis can't be asserted clean, so the
+    # aggregate is None (unknown) rather than a falsely-clean False.
+    report = ScanReport(
+        [_malware("clamav", "clean"), _malware("jcop", "error", "boom")]
+    )
+    assert report.categories() == {"malware": None}
+    assert report.as_dict()["malware"] is None
+
+
 def test_report_as_dict_omits_null_reason():
     d = ScanReport([_malware("clamav", "clean", None, time=0.01)]).as_dict()
     assert d["malware"] is False

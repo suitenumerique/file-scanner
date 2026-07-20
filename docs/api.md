@@ -1,8 +1,9 @@
 # API reference
 
 Scan endpoints require an `X-API-Key` header (see
-[deployment.md](deployment.md#authentication)). `/check` and `/metrics` are
-unauthenticated.
+[deployment.md](deployment.md#authentication)). `/check` is unauthenticated;
+`/metrics` is open unless `PROMETHEUS_API_KEY` is set (then it needs
+`Authorization: Bearer <key>`).
 
 ## `POST /api/v1.0/scan` — synchronous
 
@@ -68,7 +69,7 @@ JSON body describing a file to fetch and scan; the report is delivered to
   "metadata": { "file_id": "abc123" },
   "categories": ["malware"],
   "scanners": ["exav"],
-  "encryption": { "key": "<url-safe-base64-AES-256-key>", "chunk_size": 65536, "file_id": "abc123" }
+  "encryption": { "scheme": "aes-256-gcm-chunked-v1", "key": "<url-safe-base64-AES-256-key>", "chunk_size": 65536, "file_id": "abc123", "parts": 5 }
 }
 ```
 
@@ -78,13 +79,14 @@ back. **Response `202`:** `{ "job_id": "…", "status": "pending" }`.
 
 **`encryption`** (optional) marks the source as **client-encrypted** — the
 service decrypts it before scanning, since a scanner would otherwise pronounce
-opaque ciphertext clean. The download is AES-256-GCM in per-part chunks laid out
-`IV(12) || ciphertext || tag(16)`, each authenticated against
-`f"{file_id}:{part}"` (1-based). Fields: `key` (the URL-safe base64 AES-256 key —
-held in memory for the scan only, never persisted or logged), `chunk_size` (the
-*plaintext* bytes per chunk), `file_id` (the AAD prefix). A bad key, wrong
-chunking, or tampered/truncated ciphertext is a **permanent** failure, reported
-via the webhook as `error_kind: "file"` (`decryption_failed: …`), never retried.
+opaque ciphertext clean. AES-256-GCM, one chunk per `chunk_size` plaintext bytes,
+each `IV(12) || ciphertext || tag(16)` authenticated against
+`f"{file_id}:{part}:{parts}"` (position **and** total, so reordering and trailing
+truncation both fail). A bad key, wrong chunking, or tampered/truncated
+ciphertext is a **permanent** failure, reported via the webhook as
+`error_kind: "file"` (`decryption_failed: …`), never retried. Full caller spec
+(field meanings, IV-uniqueness requirement, key-handling caveats):
+[client-encryption.md](client-encryption.md).
 
 ### Webhook payloads
 
@@ -109,7 +111,8 @@ transient`.
 
 ## `GET /metrics` — Prometheus
 
-Unauthenticated exposition: default process metrics, scan counters
+Prometheus exposition (bearer-gated when `PROMETHEUS_API_KEY` is set): default
+process metrics, scan counters
 (`filescanner_scans_total{scanner,category,verdict,api_client}`,
 `filescanner_scan_duration_seconds{scanner,api_client}`; `api_client` is the
 caller's `API_KEYS` name), and signature-freshness gauges

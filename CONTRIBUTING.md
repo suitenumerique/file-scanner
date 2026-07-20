@@ -39,9 +39,9 @@ covered.
 Commits follow the [gitmoji](https://gitmoji.dev/) convention with an optional
 scope:
 
-```
+```text
 ✨(scanner) add exav extended-verdict support
-🐛(ci) wait for clamd before running tests
+🐛(ci) wait for clamav before running tests
 🔒️(scanner) validate webhook_url against the SSRF guard
 ```
 

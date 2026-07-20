@@ -70,7 +70,7 @@ Access is by `X-API-Key`. Keys are configured through `API_KEYS` as a
 comma-separated list of `name:key` pairs, where `name` identifies the calling
 service in the logs (e.g. `drive`, `transfers`):
 
-```
+```env
 API_KEYS="drive:s3cr3t-key,transfers:other-key"
 ```
 
@@ -82,11 +82,12 @@ dev compose ships `drive:test-key-not-for-production`.
 - **`GET /metrics`** exposes Prometheus metrics: default process metrics plus
   `filescanner_scans_total{scanner,category,verdict,api_client}` and
   `filescanner_scan_duration_seconds{scanner,api_client}` (`api_client` is the
-  calling service's `API_KEYS` name, so scans break down per consumer). It is
-  **unauthenticated by design** (a scrape target), so restrict it at the
-  ingress/network — do not expose it publicly. Sync scans are counted in the web
-  process; the worker process counts async scans (scrape it separately, or use
-  prometheus multiprocess mode).
+  calling service's `API_KEYS` name, so scans break down per consumer). Set
+  **`PROMETHEUS_API_KEY`** to require `Authorization: Bearer <key>` (unset = open,
+  so isolate it at the network layer — and note the `api_client` label exposes
+  caller identities). Sync scans are counted in the web process; the worker
+  process counts async scans (scrape it separately, or use prometheus
+  multiprocess mode).
 - **Queue dashboard.** The broker
   ([`dramatiq-redis-streams`](https://github.com/sylvinus/dramatiq-redis-streams))
   ships a dashboard for inspecting/replaying/**deleting** queued jobs. Upstream
@@ -102,7 +103,7 @@ dev compose ships `drive:test-key-not-for-production`.
 
 ## Repository layout
 
-```
+```text
 src/               application code (FastAPI app, scanners, dramatiq worker, SSRF guard, …)
 tests/             pytest suite (one file per area)
 deploy/            distroless build helpers (strip-python.sh)

@@ -135,15 +135,26 @@ def _write_decrypted(response, file_path, download_start, enc):
     Buffers wire bytes until a whole crypto chunk is available; only the tail may
     be short. The cap counts ciphertext bytes, which bounds the plaintext too.
     """
-    key = encryption.decode_key(enc["key"])
-    file_id = enc["file_id"]
-    chunk_size = int(enc["chunk_size"])
-    if chunk_size <= 0:
-        raise encryption.DecryptionError(f"invalid chunk_size {chunk_size}")
+    scheme = enc.get("scheme", encryption.SCHEME)
+    if scheme not in encryption.SCHEMES:
+        raise encryption.DecryptionError(f"unsupported encryption scheme {scheme!r}")
+    try:
+        key = encryption.decode_key(enc["key"])
+        file_id = enc["file_id"]
+        chunk_size = int(enc["chunk_size"])
+        parts = int(enc["parts"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise encryption.DecryptionError(f"invalid encryption params: {exc}") from exc
+    if not 0 < chunk_size <= encryption.MAX_CHUNK_SIZE:
+        raise encryption.DecryptionError(
+            f"chunk_size {chunk_size} out of range (1..{encryption.MAX_CHUNK_SIZE})"
+        )
+    if parts < 0:
+        raise encryption.DecryptionError(f"invalid parts {parts}")
     blob_size = chunk_size + encryption.OVERHEAD_PER_CHUNK
 
     buffer = bytearray()
-    part_number = 1
+    part_number = 0
     read = 0
     with open(file_path, "wb") as f:
         for chunk in response.iter_content(chunk_size=8192):
@@ -151,17 +162,29 @@ def _write_decrypted(response, file_path, download_start, enc):
             _check_limits(read, download_start)
             buffer.extend(chunk)
             while len(buffer) >= blob_size:
+                part_number += 1
                 f.write(
                     encryption.decrypt_chunk(
-                        key, bytes(buffer[:blob_size]), file_id, part_number
+                        key, bytes(buffer[:blob_size]), file_id, part_number, parts
                     )
                 )
                 del buffer[:blob_size]
-                part_number += 1
         # A shorter tail chunk just means the plaintext wasn't an exact multiple
         # of chunk_size; an empty buffer here means it was.
         if buffer:
-            f.write(encryption.decrypt_chunk(key, bytes(buffer), file_id, part_number))
+            part_number += 1
+            f.write(
+                encryption.decrypt_chunk(
+                    key, bytes(buffer), file_id, part_number, parts
+                )
+            )
+    # Trailing-truncation guard: per-chunk auth can't see whole trailing chunks
+    # dropped on a boundary, so the caller-declared total (bound into every
+    # chunk's AAD) must match what we actually decrypted.
+    if part_number != parts:
+        raise encryption.DecryptionError(
+            f"expected {parts} chunks, decrypted {part_number} (truncated?)"
+        )
 
 
 @register_task(max_retries=MAX_RETRIES, min_backoff=30_000, max_backoff=30_000)

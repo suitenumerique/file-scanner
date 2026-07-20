@@ -20,6 +20,9 @@ services:
       API_KEYS: "drive:test-key-not-for-production"
       CLAMAV_HOST: clamav
       CLAMAV_PORT: "3310"
+      # exav is optional (profile: exav). Configured here so the exav tests can
+      # run when it's up; they skip when it's unreachable.
+      EXAV_HOSTS: exav:3310
       WORKER_BROKER_URL: redis://redis:6379/0
       # Serve the queue dashboard at http://localhost:8090/dashboard (admin / …).
       # A password enables it; unset it to keep /dashboard absent.
@@ -44,6 +47,9 @@ services:
 
   clamav:
     image: clamav/clamav:1.4
+    # clamav publishes amd64 only; pin it so arm64 dev hosts run it emulated
+    # (no-op on amd64 CI). Needs QEMU: `docker run --privileged --rm tonistiigi/binfmt --install amd64`.
+    platform: linux/amd64
     ports:
       - 3310:3310
     volumes:
@@ -54,6 +60,26 @@ services:
       timeout: 5s
       retries: 30
       start_period: 120s
+
+  # Optional second scanner (profile: exav). exav speaks the clamd protocol and
+  # loads ClamAV's databases, so it shares clamav's downloaded signature volume
+  # (read-only) and needs no updater of its own. Its image is gated/unpublished
+  # today — build from https://github.com/sylvinus/exav or point at your registry.
+  # Bring it up with:  docker compose --profile exav up -d exav
+  # then `make test` runs the exav-marked tests (otherwise they skip).
+  exav:
+    profiles: ["exav"]
+    image: ghcr.io/sylvinus/exav:latest
+    platform: linux/amd64
+    depends_on:
+      clamav:
+        condition: service_healthy
+    environment:
+      CLAMAV_NO_FRESHCLAMD: "true" # load the shared DB, don't self-update
+    volumes:
+      - clamav_data:/var/lib/clamav:ro
+    ports:
+      - 3311:3310
 
   # Broker for async scans. Redis 7+ for the dramatiq-redis-streams consumer
   # groups. The service is otherwise stateless (results are pushed via webhook).

@@ -6,12 +6,18 @@ on:
     branches: [main]
   pull_request:
 
+# Least privilege: these jobs only read the repo.
+permissions:
+  contents: read
+
 jobs:
   lint:
     name: Lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
       - uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
@@ -27,6 +33,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
       - uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
@@ -46,6 +54,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
       - uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
@@ -53,17 +63,17 @@ jobs:
       - name: Install dependencies
         run: uv sync --frozen
 
-      - name: Wait for clamd
+      - name: Wait for clamav
         run: |
           for i in $(seq 1 120); do
             result=$(echo PING | nc -w1 localhost 3310 2>/dev/null)
             if [ "$result" = "PONG" ]; then
-              echo "clamd ready"
+              echo "clamav ready"
               exit 0
             fi
             sleep 1
           done
-          echo "clamd never became ready" && exit 1
+          echo "clamav never became ready" && exit 1
 
       - name: Run tests
         run: APP_CONFIG=config.CiConfig uv run pytest

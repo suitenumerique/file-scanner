@@ -100,13 +100,16 @@ class JcopScanner(Scanner):
         except requests.RequestException as exc:
             raise ScannerError(f"JCOP results request failed: {exc}") from exc
 
-    def _submit(self, fileobj) -> str:
+    def _submit(self, fileobj, deadline) -> str:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise ScannerError("JCOP budget exhausted before submit")
         try:
             r = requests.post(
                 f"{self.base_url}/submit",
                 headers=self._headers,
                 files={"file": ("file", fileobj)},
-                timeout=(30, self.submit_timeout),
+                timeout=(30, remaining),
             )
         except requests.RequestException as exc:
             raise ScannerError(f"JCOP submit failed: {exc}") from exc
@@ -117,6 +120,9 @@ class JcopScanner(Scanner):
         raise ScannerError(f"JCOP submit failed: HTTP {r.status_code}")
 
     def _analyse(self, file_hash, fileobj) -> dict:
+        # One deadline for the whole submit + poll flow, so total wall time stays
+        # within submit_timeout (rather than resetting the clock after submit).
+        deadline = time.monotonic() + self.submit_timeout
         # Cache check by content hash before spending a submit.
         r = self._get_result(file_hash)
         if r.status_code == HTTPStatus.OK:
@@ -125,14 +131,13 @@ class JcopScanner(Scanner):
                 return content
             poll_key = file_hash
         elif r.status_code == HTTPStatus.NOT_FOUND:
-            poll_key = self._submit(fileobj)
+            poll_key = self._submit(fileobj, deadline)
         elif r.status_code == HTTPStatus.UNAUTHORIZED:
             raise ScannerError("JCOP rejected the request: invalid API key")
         else:
             raise ScannerError(f"JCOP results lookup failed: HTTP {r.status_code}")
 
-        # Poll until the analysis is done or the total budget is spent.
-        deadline = time.monotonic() + self.submit_timeout
+        # Poll until the analysis is done or the shared budget is spent.
         while time.monotonic() < deadline:
             time.sleep(self.poll_interval)
             r = self._get_result(poll_key)

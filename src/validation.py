@@ -14,11 +14,16 @@ settings = get_settings()
 
 
 def host_allowed(hostname: str) -> bool:
-    """False when ``ALLOWED_URL_HOSTS`` is set and ``hostname`` isn't on it."""
+    """False when ``ALLOWED_URL_HOSTS`` is set and ``hostname`` isn't on it.
+
+    Hostnames are case-insensitive, so both sides are lower-cased before matching
+    (as ``ssrf.py`` does).
+    """
     if not settings.allowed_url_hosts:
         return True
-    hosts = [h.strip() for h in settings.allowed_url_hosts.split(",") if h.strip()]
-    return not hosts or hostname in hosts
+    raw = settings.allowed_url_hosts.split(",")
+    hosts = [h.strip().lower() for h in raw if h.strip()]
+    return not hosts or (hostname or "").lower() in hosts
 
 
 def assert_scannable(url: str, webhook_url: str | None = None) -> None:

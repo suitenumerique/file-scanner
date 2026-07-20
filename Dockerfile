@@ -14,6 +14,9 @@
 ARG PYTHON_VERSION=3.14.6
 ARG UV_VERSION=0.11.28
 
+# ---- uv binary: ARG expansion is allowed in FROM (unlike COPY --from) ----
+FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS uv-bin
+
 # ---- uv + managed Python ----
 FROM debian:trixie-slim AS uv
 ENV MIN_UPDATE_DATE="2026-07-20"
@@ -22,7 +25,7 @@ RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         ca-certificates git \
     && rm -rf /var/lib/apt/lists/*
-COPY --from=ghcr.io/astral-sh/uv:0.11.28 /uv /uvx /bin/
+COPY --from=uv-bin /uv /uvx /bin/
 ENV UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
     UV_PYTHON_PREFERENCE=only-managed \
@@ -67,7 +70,7 @@ ENV PATH="/venv/bin:$PATH" \
 COPY src/ /app/src/
 COPY pyproject.toml /app/
 EXPOSE 8090
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8090"]
+CMD ["python", "-c", "import os, uvicorn; uvicorn.run('app:app', host='0.0.0.0', port=int(os.environ.get('PORT', '8090')))"]
 
 # ---- Distroless production runtime ----
 # cc-debian13 provides glibc + libstdc++ for the compiled wheels (pydantic-core,
@@ -86,6 +89,6 @@ ENV PATH="/venv/bin:$PATH" \
     PORT=8090 \
     SCAN_DIR=/tmp/file-scanner
 EXPOSE 8090
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8090"]
+CMD ["python", "-c", "import os, uvicorn; uvicorn.run('app:app', host='0.0.0.0', port=int(os.environ.get('PORT', '8090')))"]
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
     CMD ["python", "-c", "import os,urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:'+os.environ.get('PORT','8090')+'/check', timeout=4).status==200 else 1)"]
