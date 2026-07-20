@@ -1,4 +1,13 @@
 *.pyc
+__pycache__/
+.venv/
 .idea
 .vscode
 .DS_Store
+
+# Test / lint artifacts
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
+.ruff_cache/

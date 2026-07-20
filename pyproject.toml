@@ -1,0 +1,104 @@
+[project]
+name = "clamav-service"
+version = "1.0.0"
+description = "REST antivirus service (clamd / exav) for La Suite Numérique"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.13"
+dependencies = [
+    "fastapi==0.139.2",
+    "uvicorn[standard]==0.51.0",
+    "python-multipart==0.0.32",
+    "requests==2.34.2",
+    "clamd==1.0.2",
+    "dnspython==2.8.0",
+    # Background tasks: dramatiq over the Redis Streams broker used across La Suite.
+    "dramatiq==2.2.0",
+    "redis==8.0.1",
+    "dramatiq-redis-streams",  # pinned by rev via [tool.uv.sources]
+    "prometheus-client==0.25.0",
+]
+
+# Dev/test tooling (PEP 735 group, synced by default; `uv sync --no-dev` skips it).
+[dependency-groups]
+dev = [
+    "pytest==9.1.1",
+    "pytest-cov==7.1.0",
+    "httpx==0.28.1",
+    "ruff==0.15.22",
+    "pip-audit==2.10.1",
+    "locust==2.46.0",
+]
+
+[tool.uv]
+# Flat modules under src/ (not an installable package): manage dependencies only.
+package = false
+
+[tool.uv.sources]
+dramatiq-redis-streams = { git = "https://github.com/sylvinus/dramatiq-redis-streams.git", rev = "819912de7259361688fcfa1b91b0c465ecd2b6e4" }
+
+[tool.ruff]
+# The production image runs uv-managed CPython 3.14 (see Dockerfile); ruff
+# targets 3.13 to match suitenumerique/messages.
+target-version = "py313"
+line-length = 88
+# Treat src/ as the first-party source root for import sorting.
+src = ["src"]
+# client-examples/ holds standalone demo scripts, not the service.
+exclude = [
+    ".git", ".venv", "venv", "__pycache__", "build", "client-examples",
+]
+
+[tool.ruff.lint]
+# Mirrors the suitenumerique/messages ruleset (minus the Django-specific rules).
+select = [
+    "B",    # flake8-bugbear
+    "C4",   # flake8-comprehensions
+    "E",    # pycodestyle errors
+    "F",    # pyflakes
+    "I",    # isort
+    "PLC",  # pylint convention
+    "PLE",  # pylint error
+    "PLR",  # pylint refactor
+    "PLW",  # pylint warning
+    "RUF",  # ruff-specific
+    "S",    # flake8-bandit
+    "T20",  # flake8-print
+    "UP",   # pyupgrade
+    "W",    # pycodestyle warnings
+]
+ignore = [
+    "PLC0415",  # import outside top-level
+    "PLR2004",  # magic value comparison
+    "PLR0911",  # too many return statements
+    "PLR0912",  # too many branches
+    "PLR0913",  # too many arguments
+    "PLR0915",  # too many statements
+    "BLE001",   # blind except (intentional: fail-closed error handling)
+    "B008",     # function call in arg default (idiomatic FastAPI Depends/File)
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests legitimately use asserts, reach into internals, and keep long literals.
+"tests/**" = ["S", "SLF001", "E501"]
+# Vendored from messages; kept close to upstream for easy rebasing.
+"**/ssrf.py" = ["SLF001"]
+# Intentional for a containerised network service: bind 0.0.0.0 and use a
+# well-known scratch dir for downloads.
+"**/config.py" = ["S104", "S108"]
+
+[tool.ruff.lint.isort]
+known-first-party = [
+    "app", "broker", "config", "scanner", "scanners", "ssrf",
+    "tasks", "validation", "version", "worker",
+]
+known-third-party = ["dns", "clamd", "dramatiq"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-ra --cov=src --cov-report=term-missing"
+markers = [
+    "integration: needs a live clamav daemon; auto-skipped when unreachable (run via `make test`)",
+]

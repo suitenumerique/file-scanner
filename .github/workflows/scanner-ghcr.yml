@@ -20,3 +20,4 @@ jobs:
     with:
       image_name: "scanner"
       context: "."
+      target: "runtime-distroless-prod"

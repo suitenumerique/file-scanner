@@ -1,42 +1,53 @@
 services:
-  clamav_rest:
-    build: .
+  app:
+    build:
+      context: .
+      target: runtime-dev
     volumes:
-      - ./:/srv/clamav-rest
-      - scan_data:/srv/scan
+      - ./:/app
     ports:
       - 8090:8090
     depends_on:
-      clamd:
+      clamav:
         condition: service_healthy
-      clamav_redis:
+      redis:
         condition: service_started
-    environment:
-      - APP_CONFIG=config.TestConfig
-      - SCAN_DIR=/srv/scan
+    environment: &app_env
+      # Dev runs the real production config (non-eager worker, real broker) so
+      # the async flow actually works end to end. API_KEYS uses the throwaway
+      # test key; override for anything real.
+      APP_CONFIG: config.ProductionConfig
+      API_KEYS: "drive:test-key-not-for-production"
+      CLAMAV_HOST: clamav
+      CLAMAV_PORT: "3310"
+      WORKER_BROKER_URL: redis://redis:6379/0
+      # Serve the queue dashboard at http://localhost:8090/dashboard (admin / …).
+      # A password enables it; unset it to keep /dashboard absent.
+      WORKER_DASHBOARD_PASSWORD: dev-dashboard-password
 
-  celery_worker:
-    build: .
-    command: celery -A tasks:celery_app worker --loglevel=info --concurrency=2
+  worker:
+    build:
+      context: .
+      target: runtime-dev
+    command: python -m worker
     volumes:
-      - ./:/srv/clamav-rest
-      - scan_data:/srv/scan
+      - ./:/app
     depends_on:
-      clamd:
+      clamav:
         condition: service_healthy
-      clamav_redis:
+      redis:
         condition: service_started
     environment:
-      - APP_CONFIG=config.TestConfig
-      - SCAN_DIR=/srv/scan
+      <<: *app_env
+      # Auto-reload the worker on code changes in dev.
+      WORKER_WATCH: /app/src
 
-  clamd:
+  clamav:
     image: clamav/clamav:1.4
     ports:
       - 3310:3310
     volumes:
       - clamav_data:/var/lib/clamav
-      - scan_data:/srv/scan
     healthcheck:
       test: ["CMD", "clamdscan", "--ping", "1"]
       interval: 10s
@@ -44,13 +55,12 @@ services:
       retries: 30
       start_period: 120s
 
-  # Celery broker only — the service is otherwise stateless (async results are
-  # pushed via webhook, nothing is persisted).
-  clamav_redis:
+  # Broker for async scans. Redis 7+ for the dramatiq-redis-streams consumer
+  # groups. The service is otherwise stateless (results are pushed via webhook).
+  redis:
     image: redis:7-alpine
     ports:
       - 6380:6379
 
 volumes:
   clamav_data:
-  scan_data:
