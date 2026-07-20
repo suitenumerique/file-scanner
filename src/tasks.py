@@ -7,6 +7,7 @@ import uuid
 import requests as http_requests
 from dramatiq.middleware import CurrentMessage
 
+import encryption
 from broker import register_task
 from config import get_settings
 from scanner import ScannerError, run_scanners
@@ -101,9 +102,78 @@ def _deliver(result, webhook_url, report, *, transient_error=False):
         _send_webhook(webhook_url, result)
 
 
+def _check_limits(read_bytes, download_start):
+    """Enforce the size + total-time download budgets mid-stream (raises
+    ``FileError``). The per-read socket timeout alone can't stop a server that
+    dribbles one byte just inside each window (slow-drip DoS), and a missing or
+    understated Content-Length must not let an unbounded body fill the volume."""
+    if timeit.default_timer() - download_start > settings.download_max_seconds:
+        raise FileError(
+            f"download_timeout: exceeded {settings.download_max_seconds}s "
+            "total transfer budget"
+        )
+    if read_bytes > settings.max_url_size:
+        raise FileError(
+            f"file_too_large: streamed over {settings.max_url_size} bytes "
+            "(Content-Length missing or understated)"
+        )
+
+
+def _write_plaintext(response, file_path, download_start):
+    """Stream the body straight to disk, bounded by the size + time budgets."""
+    read = 0
+    with open(file_path, "wb") as f:
+        for chunk in response.iter_content(chunk_size=8192):
+            read += len(chunk)
+            _check_limits(read, download_start)
+            f.write(chunk)
+
+
+def _write_decrypted(response, file_path, download_start, enc):
+    """Stream the ciphertext, decrypt chunk by chunk, write plaintext.
+
+    Buffers wire bytes until a whole crypto chunk is available; only the tail may
+    be short. The cap counts ciphertext bytes, which bounds the plaintext too.
+    """
+    key = encryption.decode_key(enc["key"])
+    file_id = enc["file_id"]
+    chunk_size = int(enc["chunk_size"])
+    if chunk_size <= 0:
+        raise encryption.DecryptionError(f"invalid chunk_size {chunk_size}")
+    blob_size = chunk_size + encryption.OVERHEAD_PER_CHUNK
+
+    buffer = bytearray()
+    part_number = 1
+    read = 0
+    with open(file_path, "wb") as f:
+        for chunk in response.iter_content(chunk_size=8192):
+            read += len(chunk)
+            _check_limits(read, download_start)
+            buffer.extend(chunk)
+            while len(buffer) >= blob_size:
+                f.write(
+                    encryption.decrypt_chunk(
+                        key, bytes(buffer[:blob_size]), file_id, part_number
+                    )
+                )
+                del buffer[:blob_size]
+                part_number += 1
+        # A shorter tail chunk just means the plaintext wasn't an exact multiple
+        # of chunk_size; an empty buffer here means it was.
+        if buffer:
+            f.write(encryption.decrypt_chunk(key, bytes(buffer), file_id, part_number))
+
+
 @register_task(max_retries=MAX_RETRIES, min_backoff=30_000, max_backoff=30_000)
 def scan_task(
-    job_id, url, scanners, filename=None, webhook_url=None, metadata=None, api_client=""
+    job_id,
+    url,
+    scanners,
+    filename=None,
+    webhook_url=None,
+    metadata=None,
+    api_client="",
+    encryption_params=None,
 ):
     """Download a file from ``url``, scan it with ``scanners``, and push the
     per-scanner report to ``webhook_url``.
@@ -111,6 +181,10 @@ def scan_task(
     Fully stateless: everything the task needs travels in the message, and the
     only output is the webhook POST. The file is streamed to each scanner, so the
     worker needs no filesystem shared with the scanners.
+
+    ``encryption_params`` (``{key, chunk_size, file_id}``) marks the source as
+    client-encrypted: decrypt before scanning, since a scanner would otherwise
+    pronounce opaque ciphertext clean. Omit it and the body is scanned as-is.
     """
     file_path = None
     result = {"job_id": job_id, "filename": filename, "metadata": metadata}
@@ -140,28 +214,14 @@ def scan_task(
                 f"{settings.max_url_size} limit"
             )
 
-        # Total wall-clock budget for the transfer: the per-read timeout alone
-        # can't stop a server that dribbles one byte just inside each window,
-        # holding a worker slot indefinitely (slow-drip DoS).
+        # Stream to disk (both writers enforce the size + total-time budgets via
+        # _check_limits). A client-encrypted source is decrypted to plaintext
+        # first, or the scanner would pronounce opaque ciphertext clean.
         download_start = timeit.default_timer()
-        written = 0
-        with open(file_path, "wb") as f:
-            for chunk in response.iter_content(chunk_size=8192):
-                if (
-                    timeit.default_timer() - download_start
-                    > settings.download_max_seconds
-                ):
-                    raise FileError(
-                        f"download_timeout: exceeded {settings.download_max_seconds}s "
-                        "total transfer budget"
-                    )
-                written += len(chunk)
-                if written > settings.max_url_size:
-                    raise FileError(
-                        f"file_too_large: streamed over {settings.max_url_size} "
-                        "bytes (Content-Length missing or understated)"
-                    )
-                f.write(chunk)
+        if encryption_params:
+            _write_decrypted(response, file_path, download_start, encryption_params)
+        else:
+            _write_plaintext(response, file_path, download_start)
 
         # Each scanner opens its own handle on the downloaded file so they can
         # stream in parallel.
@@ -172,6 +232,13 @@ def scan_task(
     except FileError as exc:
         logger.error(f"Job {job_id} file error: {exc}")
         _report_error(result, webhook_url, "file", str(exc))
+        return
+
+    except encryption.DecryptionError as exc:
+        # A retry can't fix bad bytes or a bad key — report as a file error so
+        # the caller drops the file instead of looping. Never log the key.
+        logger.error(f"Job {job_id} decryption failed: {exc}")
+        _report_error(result, webhook_url, "file", f"decryption_failed: {exc}")
         return
 
     except SSRFValidationError as exc:

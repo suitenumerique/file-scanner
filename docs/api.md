@@ -67,13 +67,24 @@ JSON body describing a file to fetch and scan; the report is delivered to
   "webhook_url": "https://app.example.com/av-callback",
   "metadata": { "file_id": "abc123" },
   "categories": ["malware"],
-  "scanners": ["exav"]
+  "scanners": ["exav"],
+  "encryption": { "key": "<url-safe-base64-AES-256-key>", "chunk_size": 65536, "file_id": "abc123" }
 }
 ```
 
 `categories` and `scanners` are the same union selectors as the sync endpoint,
 both optional (neither → `DEFAULT_CATEGORIES`); `metadata` is opaque and echoed
 back. **Response `202`:** `{ "job_id": "…", "status": "pending" }`.
+
+**`encryption`** (optional) marks the source as **client-encrypted** — the
+service decrypts it before scanning, since a scanner would otherwise pronounce
+opaque ciphertext clean. The download is AES-256-GCM in per-part chunks laid out
+`IV(12) || ciphertext || tag(16)`, each authenticated against
+`f"{file_id}:{part}"` (1-based). Fields: `key` (the URL-safe base64 AES-256 key —
+held in memory for the scan only, never persisted or logged), `chunk_size` (the
+*plaintext* bytes per chunk), `file_id` (the AAD prefix). A bad key, wrong
+chunking, or tampered/truncated ciphertext is a **permanent** failure, reported
+via the webhook as `error_kind: "file"` (`decryption_failed: …`), never retried.
 
 ### Webhook payloads
 

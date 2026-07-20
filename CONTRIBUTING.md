@@ -48,5 +48,4 @@ scope:
 ## Pull requests
 
 - Target the default branch.
-- Update `CHANGELOG.md` under `## [Unreleased]`.
 - Make sure `make lint` and the tests pass.

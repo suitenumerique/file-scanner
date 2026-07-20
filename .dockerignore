@@ -12,6 +12,5 @@ __pycache__
 tests
 client-examples
 *.md
-CHANGELOG.md
 CONTRIBUTING.md
 SECURITY.md
