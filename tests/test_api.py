@@ -40,7 +40,11 @@ def test_metrics_label_api_client(auth_client, clamav_cd):
 
 
 def test_metrics_signature_gauges(client, clamav, monkeypatch):
-    monkeypatch.setattr(metrics, "_last_signature_refresh", 0.0)  # bypass the TTL
+    # Bypass the refresh TTL. Must be -inf, not 0.0: the check is
+    # ``monotonic() - _last < TTL`` and ``monotonic()`` is seconds since boot, so
+    # on a freshly-booted CI runner it can be < TTL, leaving 0.0 within the window
+    # and skipping the refresh. "Infinitely long ago" is always past the TTL.
+    monkeypatch.setattr(metrics, "_last_signature_refresh", float("-inf"))
     # ``/metrics`` uses ``resolve_scanners()`` to decide which scanners to
     # refresh, and that reads ``DEFAULT_CATEGORIES`` from settings. An
     # empty default (env-less CI runs) makes ``resolve_scanners`` raise
