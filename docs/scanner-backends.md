@@ -30,11 +30,12 @@ optional `version`) in a new `scanners/<name>.py`, set its `category` (and
 
 ## clamav
 
-Connects to `CLAMAV_SOCKET` or `CLAMAV_HOST:CLAMAV_PORT`. For horizontal scale,
-set `CLAMAV_HOSTS="h1:3310,h2:3310,…"` — a host is picked at **random per scan**
+Connects to `CLAMAV_SOCKET` (a Unix socket, if set) or the `CLAMAV_HOSTS` pool
+(defaults to `localhost:3310`). For horizontal scale, set
+`CLAMAV_HOSTS="h1:3310,h2:3310,…"` — a host is picked at **random per scan**
 (client-side balancing), and a connection failure becomes a transient error so
 the task retry fails over to another host. No external load balancer required
-(though one is still fine — point `CLAMAV_HOST` at its VIP).
+(though one is still fine — point `CLAMAV_HOSTS` at its VIP).
 
 ## exav
 

@@ -80,19 +80,17 @@ class Settings(BaseSettings):
     # DNS TXT record queried for the latest published signature database version,
     # exposed as the freshness gauge on /metrics. (CLAMAV_TXT_URI)
     clamav_txt_uri: str = "current.cvd.clamav.net"
-    clamav_host: str = "localhost"  # single daemon hostname (CLAMAV_HOST)
-    clamav_port: int = 3310  # single daemon TCP port (CLAMAV_PORT)
     # Socket timeout (s) for a clamd connection, so an unreachable/hung daemon
     # fails the scan instead of blocking a worker forever. Generous by default to
     # not trip on a legitimately slow scan of a large file. (CLAMAV_TIMEOUT)
     clamav_timeout: int = 300
-    # Unix socket path; when set it takes precedence over host/port. (CLAMAV_SOCKET)
+    # Unix socket path; when set it takes precedence over the host list. (CLAMAV_SOCKET)
     clamav_socket: str = ""
-    # Optional client-side balancing: a comma-separated list of ``host:port``
-    # (port defaults to 3310). When set, a host is picked at random per scan and
-    # the task-level retry fails over to another — no external load balancer
-    # needed. Overrides the single host/socket above. (CLAMAV_HOSTS)
-    clamav_hosts: str = ""
+    # The clamav daemon pool: a comma-separated list of ``host:port`` (port
+    # defaults to 3310). A single entry is a single daemon; with several, a host
+    # is picked at random per scan and the task-level retry fails over to another
+    # — client-side balancing, no external load balancer needed. (CLAMAV_HOSTS)
+    clamav_hosts: str = "localhost:3310"
 
     # --- exav backend (its own daemon pool; can run alongside clamav) ---
     # Comma-separated ``host:port`` list for the exav pool (balanced per scan like
@@ -180,6 +178,16 @@ class Settings(BaseSettings):
     webhook_timeout: int = 10  # per-attempt timeout (s) (WEBHOOK_TIMEOUT)
     webhook_max_attempts: int = 3  # attempts before giving up (WEBHOOK_MAX_ATTEMPTS)
 
+    # --- Async job result store (poll by id) ---
+    # TTL (seconds) for an async scan's stored result, which enables
+    # GET /api/v1.0/jobs/{job_id}. The record lives in the streams broker's Redis
+    # (namespaced by WORKER_QUEUE_NAMESPACE) and expires after this many seconds.
+    # 0 (default) disables the store: the service stays fully stateless and
+    # webhook-only, so webhook_url is then mandatory on every async scan. When
+    # > 0, webhook_url becomes optional (a caller may poll instead) and the
+    # webhook remains the primary delivery channel. (WORKER_RESULT_TTL)
+    worker_result_ttl: int = 0
+
     # --- Queue dashboard (dramatiq-redis-streams) ---
     # The dashboard exposes DESTRUCTIVE, unauthenticated endpoints upstream. The
     # web app mounts it (behind a Basic-auth + IP-allowlist guard, see
@@ -247,7 +255,7 @@ class TestConfig(_StaticSettings):
     debug: bool = True
     testing: bool = True
     worker_eager: bool = True
-    clamav_host: str = "clamav"
+    clamav_hosts: str = "clamav:3310"
     max_upload_size: int = 4999999
     max_url_size: int = 4999999
     # Opt-in: point the exav backend at a running daemon to exercise the exav
@@ -260,7 +268,7 @@ class CiConfig(_StaticSettings):
     debug: bool = True
     testing: bool = True
     worker_eager: bool = True
-    clamav_host: str = "localhost"
+    clamav_hosts: str = "localhost:3310"
     max_upload_size: int = 4999999
     max_url_size: int = 4999999
     exav_hosts: str = os.environ.get("EXAV_HOSTS", "")
@@ -270,7 +278,7 @@ class LocalConfig(_StaticSettings):
     debug: bool = True
     testing: bool = True
     worker_eager: bool = True
-    clamav_host: str = "localhost"
+    clamav_hosts: str = "localhost:3310"
     max_upload_size: int = 4999999
     max_url_size: int = 4999999
 

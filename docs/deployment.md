@@ -24,6 +24,27 @@ broker (as in suitenumerique/st-home and /messages). The task streams the file
 to clamd/exav over the socket (INSTREAM), so the worker needs **no filesystem
 shared with the scanner** — just network reachability and the Redis broker.
 
+### Queues
+
+Two queues separate the heavy work from the light: **`scans`** (`scan_task` —
+download + AV scan, minutes for a big file) and **`webhooks`** (`deliver_webhook`
+— one HTTP POST). The single `worker` consumes **both** (`WORKER_QUEUES` defaults
+to `webhooks scans`), which is enough for most deployments.
+
+Within one worker, `deliver_webhook` is given a higher dramatiq **actor
+priority** than `scan_task` (`priority=5` vs `10` — lower runs first), so when a
+worker thread frees it picks a buffered callback ahead of buffered scans. This is
+*soft* ordering only: dramatiq applies priority in an in-memory queue *after*
+fetching, so it reorders waiting work but **cannot preempt a scan already
+running** — if every thread is mid-scan, a webhook still waits for one to finish.
+(Queue *order* in `--queues` is not priority — one worker feeds every queue it
+consumes into a shared thread pool.) To keep callbacks prompt even under a full
+scan backlog, run a **dedicated webhooks worker** — a second `python -m worker`
+with `WORKER_QUEUES=webhooks` (it needs Redis + outbound network, but **not**
+clamav) — and set `WORKER_QUEUES=scans` on the scan worker. This is a pure
+deployment change; no code change is needed. **If you split them, both workers
+are required** — without the webhooks worker, no callback is delivered.
+
 ## Authentication
 
 Scan endpoints authenticate with a short-lived EdDSA (Ed25519) **Bearer JWT** in
@@ -74,16 +95,15 @@ secrets** — the `*.defaults` keys are throwaway.
 | `PROMETHEUS_API_KEY` | *(empty)* | If set, `/metrics` requires `Authorization: Bearer <key>`. Empty = open (isolate it at the network layer). |
 | `DEFAULT_SCANNERS` | `{"malware": ["clamav"]}` | JSON `category → [engines]` map: the categories that exist and which engines compose each. |
 | `DEFAULT_CATEGORIES` | `malware` | Comma-separated categories run when a request names neither `categories` nor `scanners`. Must be keys of `DEFAULT_SCANNERS`. |
-| `CLAMAV_HOST` | `clamav` | Single clamav daemon hostname. |
-| `CLAMAV_PORT` | `3310` | Single clamav daemon TCP port. |
-| `CLAMAV_SOCKET` | *(empty)* | Unix socket path; takes precedence over host/port. |
-| `CLAMAV_HOSTS` | *(empty)* | `host:port,…` pool for client-side balancing; overrides the single host/socket. |
+| `CLAMAV_SOCKET` | *(empty)* | Unix socket path; takes precedence over the host list. |
+| `CLAMAV_HOSTS` | `localhost:3310` | `host:port,…` clamav daemon pool; a single entry is one daemon, several enable client-side balancing. |
 | `EXAV_HOSTS` | *(empty)* | `host:port,…` pool for the exav scanner (required to use `exav`). |
 | `CLAMAV_TXT_URI` | `current.cvd.clamav.net` | DNS TXT record for the latest signature version (freshness gauge). |
 | `JCOP_BASE_URL` / `JCOP_API_KEY` | *(empty)* | jcop backend endpoint + token (required to use `jcop`). |
 | `JCOP_RESULT_TIMEOUT` / `JCOP_SUBMIT_TIMEOUT` / `JCOP_POLL_INTERVAL` | `30` / `600` / `5` | jcop poll timeout / total budget / poll interval (s). |
 | `WORKER_BROKER_URL` | `redis://localhost:6379/0` | Redis broker for async scans. |
-| `WORKER_PROCESSES` / `WORKER_THREADS` / `WORKER_QUEUES` | `2` / `8` / `default` | dramatiq worker sizing. |
+| `WORKER_PROCESSES` / `WORKER_THREADS` | `2` / `8` | dramatiq worker sizing (processes forked / threads per process). |
+| `WORKER_QUEUES` | `webhooks scans` | Space-separated queues the worker consumes. Default runs both on one worker; set `scans` here and run a second worker with `webhooks` to dedicate capacity to callback delivery. |
 | `WORKER_DASHBOARD_PASSWORD` | *(empty)* | Basic-auth password — the secret. **Empty ⇒ the dashboard is not served**; setting it mounts it (fail-closed 401 otherwise). |
 | `WORKER_DASHBOARD_USER` | *(empty)* | Optional Basic-auth username to also require; empty accepts **any** username. |
 | `WORKER_DASHBOARD_PATH` | `/dashboard` | Path the dashboard is mounted at on the web app. |
@@ -97,6 +117,7 @@ secrets** — the `*.defaults` keys are throwaway.
 | `ENCRYPTION_MIN_CHUNK_SIZE` | `4096` (4 KiB) | Floor on a client-encrypted source's `chunk_size` (guards a chunk-count CPU cost). |
 | `ENCRYPTION_MAX_CHUNK_SIZE` | `52428800` (50 MiB) | Ceiling on `chunk_size` — the worker buffers one whole chunk in RAM, so this × worker concurrency bounds memory. |
 | `WEBHOOK_TIMEOUT` / `WEBHOOK_MAX_ATTEMPTS` | `10` / `3` | Per-attempt timeout (s) / attempts before giving up. |
+| `WORKER_RESULT_TTL` | `0` | TTL (s) for an async job's stored result, enabling `GET /api/v1.0/jobs/{job_id}` (record kept in the broker's Redis). `0` = disabled (fully stateless, webhook-only, `webhook_url` mandatory); `> 0` makes `webhook_url` optional. |
 | `ALLOWED_URL_HOSTS` | *(empty)* | If set, **only** these hostnames may be submitted (positive allowlist). |
 | `SSRF_ALLOWED_HOSTS` | *(empty)* | Hosts trusted to resolve to a private/internal address (SSRF bypass). |
 
@@ -221,8 +242,14 @@ network-restricted process against the same broker.
 
 The scanner daemon is the heavy tier (each loads the full signature DB). Because
 scans go over INSTREAM there is no shared filesystem, so scale the tiers
-independently: run a **pool of clamav/exav daemons** (behind a load balancer via
-`CLAMAV_HOST`, or client-side via `CLAMAV_HOSTS` / `EXAV_HOSTS`) and scale
+independently: run a **pool of clamav/exav daemons** (behind a load balancer, or
+client-side via `CLAMAV_HOSTS` / `EXAV_HOSTS`) and scale
 **worker replicas** — the Redis Streams broker distributes jobs across them.
 Keep total worker concurrency ≤ the scanner pool's capacity, stagger signature
 reloads, and cap clamd (`MaxScanSize`, `StreamMaxLength`, …).
+
+Because `scan_task` (queue `scans`) and `deliver_webhook` (queue `webhooks`) are
+separate queues, you can also scale them independently — bound the `scans`
+worker's concurrency by the scanner pool while giving a `webhooks` worker high
+concurrency (it only makes HTTP calls) so callbacks stay prompt (see
+[Queues](#queues)).

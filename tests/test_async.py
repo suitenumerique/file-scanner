@@ -17,6 +17,16 @@ from tasks import scan_task
 ASYNC_URL = "/api/v1.0/scan-async"
 
 
+def test_tasks_use_dedicated_queues():
+    # Heavy scans and light webhook delivery ride separate queues so they can be
+    # scaled independently; the single worker consumes both by default.
+    assert scan_task.queue_name == "scans"
+    assert tasks.deliver_webhook.queue_name == "webhooks"
+    # Webhooks outrank scans (lower number runs first) so a buffered callback is
+    # picked ahead of buffered scans when a worker thread frees.
+    assert tasks.deliver_webhook.priority < scan_task.priority
+
+
 # --- endpoint ---
 
 
@@ -245,6 +255,7 @@ def test_task_clean(run_task):
     (sent,) = run_task(verdict=("OK", None))
     assert sent["malware"] is False
     assert sent["scanners"][0]["kind"] == "clean"
+    assert sent["status"] == "done"
     assert "error_kind" not in sent
 
 

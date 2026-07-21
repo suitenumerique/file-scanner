@@ -14,15 +14,18 @@ which union); otherwise `DEFAULT_CATEGORIES` is used. See
 [docs/categories.md](docs/categories.md) and
 [docs/scanner-backends.md](docs/scanner-backends.md).
 
-The service is **stateless**: a synchronous scan returns its verdict in the HTTP
-response; an asynchronous scan delivers its verdict only via a webhook callback.
+The service is **stateless by default**: a synchronous scan returns its verdict in
+the HTTP response; an asynchronous scan delivers its verdict via a webhook
+callback. Optionally (`WORKER_RESULT_TTL > 0`) it also keeps a TTL-bounded result in
+Redis so callers can poll a job by id instead of receiving a webhook.
 
 ## Endpoints
 
 | Method | Path | Auth | Purpose |
 | --- | --- | --- | --- |
 | `POST` | `/api/v1.0/scan` | JWT | Synchronous scan of an uploaded file → per-category + per-scanner report. |
-| `POST` | `/api/v1.0/scan-async` | JWT | Async scan of a file fetched from a URL; result delivered to a webhook. |
+| `POST` | `/api/v1.0/scan-async` | JWT | Async scan of a file fetched from a URL; result delivered to a webhook (and/or polled). |
+| `GET`  | `/api/v1.0/jobs/{job_id}` | JWT | Poll an async job's result (only when `WORKER_RESULT_TTL > 0`, else `404`). |
 | `GET`  | `/check`, `/` | — | Liveness: `200 Service OK` when the scanners answer, else `503`. |
 | `GET`  | `/.well-known/jwks.json` | — | Webhook-signing public key(s) (JWK Set) for receivers to verify signed callbacks. |
 | `GET`  | `/metrics` | — | Prometheus exposition, incl. signature freshness (see [Monitoring](#monitoring)). |
@@ -73,7 +76,7 @@ make stop      # stop the stack
 | Service | URL / Port | Description | Credentials |
 | --- | --- | --- | --- |
 | **app** (web) | [http://localhost:8090](http://localhost:8090) | FastAPI REST API + `/metrics` | JWT — dev caller `dev-issuer` (throwaway key, see [Auth & callers](#auth--callers)) |
-| **worker** | — | dramatiq worker (async scans) | — |
+| **worker** | — | dramatiq worker — async scans (`scans` queue) + webhook delivery (`webhooks` queue) | — |
 | **clamav** | `localhost:3310` | ClamAV / exav daemon (clamd protocol) | none |
 | **redis** | `localhost:6380` | dramatiq broker (Redis Streams) | none |
 

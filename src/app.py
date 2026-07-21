@@ -21,6 +21,7 @@ from pydantic import BaseModel, Field, HttpUrl, field_validator
 
 import encryption
 import jwt_auth
+import results
 from config import get_settings
 from metrics import refresh_signatures
 from scanner import get_scanner, resolve_scanners, run_scanners, validate_registry
@@ -307,10 +308,10 @@ def scan_async(
     body: ScanAsyncRequest,
     username: str = Depends(auth_async),
 ):
-    """Queue an asynchronous scan. Stateless: nothing is persisted — the result
-    is delivered exclusively via the (mandatory) ``webhook_url`` callback, so a
-    caller that can't receive webhooks must use the synchronous
-    ``/api/v1.0/scan``.
+    """Queue an asynchronous scan. The result is delivered via the ``webhook_url``
+    callback and, when the result store is enabled (``WORKER_RESULT_TTL > 0``), also
+    persisted for polling at ``GET /api/v1.0/jobs/{job_id}``. At least one channel
+    must exist: ``webhook_url`` is required unless the store is enabled.
     """
     names = _resolve(body.categories, body.scanners)
 
@@ -320,12 +321,14 @@ def scan_async(
     except SSRFValidationError as exc:
         raise HTTPException(400, detail=str(exc)) from exc
 
-    if not body.webhook_url:
-        raise HTTPException(422, detail="webhook_url is required for async scans")
+    if not body.webhook_url and not results.enabled():
+        raise HTTPException(
+            422,
+            detail="webhook_url is required (no result store configured to poll)",
+        )
 
-    # The job id is a correlation handle echoed back in the webhook payload.
-    # Today the service is stateless (webhook-only delivery), but nothing here
-    # precludes a future API persisting the job and letting callers poll it by id.
+    # The job id is a correlation handle echoed back in the webhook payload and,
+    # when the store is enabled, the key a caller polls the result by.
     job_id = str(uuid.uuid4())
     scan_task.send(
         job_id,
@@ -337,9 +340,38 @@ def scan_async(
         username,
         body.encryption.model_dump() if body.encryption else None,
     )
+    # Seed a pending record so a poll right after the 202 sees the job (the worker
+    # overwrites it with the terminal result). No-op when the store is disabled.
+    results.record(
+        job_id,
+        username,
+        {
+            "job_id": job_id,
+            "status": results.PENDING,
+            "filename": body.filename,
+            "metadata": body.metadata,
+        },
+    )
 
     logger.info(
         f"Async scan job {job_id} created by {username} for {url_str} "
         f"(encrypted={body.encryption is not None})"
     )
     return {"job_id": job_id, "status": "pending"}
+
+
+@app.get("/api/v1.0/jobs/{job_id}")
+def job_status(job_id: str, username: str = Depends(auth_sync)):
+    """Poll an async scan by id. Returns the stored record — the same shape the
+    webhook delivers, with a ``status`` of ``pending`` / ``done`` / ``error`` — or
+    ``404`` once it has expired, was never created, or belongs to another caller.
+    Requires ``WORKER_RESULT_TTL > 0``; with the store disabled this is always 404.
+    """
+    if not results.enabled():
+        raise HTTPException(
+            404, detail="result store is disabled (WORKER_RESULT_TTL=0)"
+        )
+    record = results.fetch(job_id, username)
+    if record is None:
+        raise HTTPException(404, detail="job not found")
+    return record

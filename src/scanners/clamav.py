@@ -1,8 +1,8 @@
 """ClamAV scanner backend (the clamd wire protocol).
 
-Connects to ``CLAMAV_SOCKET`` or ``CLAMAV_HOST:CLAMAV_PORT``; if ``CLAMAV_HOSTS`` is
-set (``host:port,...``) a host is picked at random per scan for client-side
-balancing (the task-level retry fails over to another). All clamd/ClamAV
+Connects to ``CLAMAV_SOCKET`` (a Unix socket, if set) or the ``CLAMAV_HOSTS`` pool
+(``host:port,...``); with several hosts one is picked at random per scan for
+client-side balancing (the task-level retry fails over to another). All clamd/ClamAV
 specifics — connection, INSTREAM, and verdict classification — live here; the
 exav backend (``exav.py``) subclasses this one.
 
@@ -76,12 +76,10 @@ class ClamavScanner(Scanner):
 
     def _endpoints(self):
         """Return ``(socket_path, hosts)`` for this backend — override in
-        subclasses. Exactly one is set."""
-        if settings.clamav_hosts:
-            return None, parse_hosts(settings.clamav_hosts)
+        subclasses. Exactly one is set; the socket takes precedence."""
         if settings.clamav_socket:
             return settings.clamav_socket, None
-        return None, [(settings.clamav_host, settings.clamav_port)]
+        return None, parse_hosts(settings.clamav_hosts)
 
     def _client(self):
         """Build a fresh clamd client, picking a random host from the pool so a

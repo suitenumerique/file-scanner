@@ -17,11 +17,15 @@ JWT_SIGNING_KEY=uGyAqjXdgjOXWLLzChBCzgzzvUUJcSsy6-ctdhqeHhM
 JWT_SIGNING_KID=dev-1
 
 # Scanner + broker (container DNS names on the compose network).
-CLAMAV_HOST=clamav
-CLAMAV_PORT=3310
+CLAMAV_HOSTS=clamav:3310
 # exav is optional (profile: exav); configured so its tests run when it's up.
 EXAV_HOSTS=exav:3310
 WORKER_BROKER_URL=redis://redis:6379/0
+
+# Enable the async result store in dev (1h TTL) so GET /api/v1.0/jobs/{job_id}
+# works out of the box; production leaves it at 0 (stateless) unless a consumer
+# needs polling.
+WORKER_RESULT_TTL=3600
 
 # Queue dashboard at http://localhost:8090/dashboard (any username / this
 # password). A password enables it; unset it to keep /dashboard absent.

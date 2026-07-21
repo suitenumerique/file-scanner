@@ -10,7 +10,10 @@ Environment variables (WORKER_*, broker-agnostic so the implementation can be
 swapped without renaming configuration):
     WORKER_PROCESSES   worker processes to fork (default "2")
     WORKER_THREADS     threads per process (default "8")
-    WORKER_QUEUES      space-separated queues to consume (default "default")
+    WORKER_QUEUES      space-separated queues to consume
+                       (default "webhooks scans" — both queues on one worker;
+                       set e.g. "webhooks" to dedicate a worker to fast webhook
+                       delivery so a scan backlog can't delay callbacks)
     WORKER_WATCH       path to watch for code changes and auto-reload
                        (e.g. "." in local dev; leave unset in production)
 """
@@ -39,7 +42,7 @@ def build_argv():
     if watch:
         argv += ["--watch", watch]
     # --queues takes a variable number of values, so keep it last.
-    argv += ["--queues", *os.getenv("WORKER_QUEUES", "default").split()]
+    argv += ["--queues", *os.getenv("WORKER_QUEUES", "webhooks scans").split()]
     return argv
 
 

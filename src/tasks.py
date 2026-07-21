@@ -10,6 +10,7 @@ from dramatiq.middleware import CurrentMessage
 
 import encryption
 import jwt_auth
+import results
 from broker import register_task
 from config import get_settings
 from scanner import ScannerError, run_scanners
@@ -44,6 +45,12 @@ def _retries_exhausted() -> bool:
 
 
 @register_task(
+    queue="webhooks",
+    # Lower priority number runs first (dramatiq re-sorts in-memory after fetch),
+    # so a buffered callback (5) jumps ahead of buffered scans (10) when a worker
+    # thread frees. Soft ordering only: it can't preempt a scan already running,
+    # so a dedicated webhooks worker is the hard guarantee.
+    priority=5,
     max_retries=settings.webhook_max_attempts,
     min_backoff=1_000,
     max_backoff=60_000,
@@ -51,8 +58,9 @@ def _retries_exhausted() -> bool:
 def deliver_webhook(webhook_url, payload):
     """Push one scan result to the caller's webhook — its own retriable task.
 
-    The service is stateless, so the webhook is the ONLY delivery channel for an
-    async scan; it must be as durable as the scan itself. Rather than a blocking
+    The webhook is the primary delivery channel for an async scan (the poll store,
+    when enabled, is a fallback), so it must be as durable as the scan itself.
+    Rather than a blocking
     in-line retry loop inside ``scan_task`` (which would re-download and re-scan
     on the heavy scanner tier just because a receiver blipped, and would dead-
     letter the scan args — including the decryption key — on failure), delivery
@@ -108,20 +116,30 @@ class FileError(Exception):
     permanent, so it is reported at once rather than retried."""
 
 
-def _report_error(result, webhook_url, kind, message):
-    """Populate ``result`` with a pre-scan error and enqueue its delivery."""
-    result.update(status="error", error_kind=kind, error=message)
-    if webhook_url:
-        deliver_webhook.send(webhook_url, result)
+def _report_error(result, webhook_url, owner, kind, message):
+    """Populate ``result`` with a pre-scan error, then persist + deliver it."""
+    result.update(status=results.ERROR, error_kind=kind, error=message)
+    _finalize(result, webhook_url, owner)
 
 
-def _deliver(result, webhook_url, report, *, transient_error=False):
-    """Enqueue delivery of the per-scanner report to the webhook."""
+def _deliver(result, webhook_url, owner, report, *, transient_error=False):
+    """Attach the per-scanner report, then persist + deliver the terminal result."""
     result.update(report.as_dict())  # malware + scanners breakdown
     if transient_error:
         result.update(
-            status="error", error_kind="transient", error="all scanners failed"
+            status=results.ERROR, error_kind="transient", error="all scanners failed"
         )
+    else:
+        result["status"] = results.DONE
+    _finalize(result, webhook_url, owner)
+
+
+def _finalize(result, webhook_url, owner):
+    """Record the terminal result for polling (no-op when the store is disabled)
+    and enqueue its webhook delivery (when a ``webhook_url`` was given). At least
+    one channel is always present — the endpoint requires a webhook unless the
+    store is enabled."""
+    results.record(result["job_id"], owner, result)
     if webhook_url:
         deliver_webhook.send(webhook_url, result)
 
@@ -216,7 +234,13 @@ def _write_decrypted(response, file_path, download_start, enc):
         )
 
 
-@register_task(max_retries=MAX_RETRIES, min_backoff=30_000, max_backoff=30_000)
+@register_task(
+    queue="scans",
+    priority=10,  # lower priority than webhooks (5) so callbacks run first
+    max_retries=MAX_RETRIES,
+    min_backoff=30_000,
+    max_backoff=30_000,
+)
 def scan_task(
     job_id,
     url,
@@ -230,9 +254,10 @@ def scan_task(
     """Download a file from ``url``, scan it with ``scanners``, and push the
     per-scanner report to ``webhook_url``.
 
-    Fully stateless: everything the task needs travels in the message, and the
-    only output is the webhook POST. The file is streamed to each scanner, so the
-    worker needs no filesystem shared with the scanners.
+    Everything the task needs travels in the message; the output is the webhook
+    POST and, when the store is enabled, a TTL-bounded result record to poll. The
+    file is streamed to each scanner, so the worker needs no filesystem shared
+    with the scanners.
 
     ``encryption_params`` (``{scheme, key, chunk_size, file_id, parts}``) marks
     the source as client-encrypted: decrypt before scanning, since a scanner would
@@ -284,32 +309,36 @@ def scan_task(
 
     except FileError as exc:
         logger.error(f"Job {job_id} file error: {exc}")
-        _report_error(result, webhook_url, "file", str(exc))
+        _report_error(result, webhook_url, api_client, "file", str(exc))
         return
 
     except encryption.DecryptionError as exc:
         # A retry can't fix bad bytes or a bad key — report as a file error so
         # the caller drops the file instead of looping. Never log the key.
         logger.error(f"Job {job_id} decryption failed: {exc}")
-        _report_error(result, webhook_url, "file", f"decryption_failed: {exc}")
+        _report_error(
+            result, webhook_url, api_client, "file", f"decryption_failed: {exc}"
+        )
         return
 
     except SSRFValidationError as exc:
         logger.error(f"Job {job_id} blocked by scan policy: {exc}")
-        _report_error(result, webhook_url, "file", f"ssrf_blocked: {exc}")
+        _report_error(result, webhook_url, api_client, "file", f"ssrf_blocked: {exc}")
         return
 
     except http_requests.RequestException as exc:
         # Download failures report at once: the URL is frozen in the task args,
         # so a stale/expired presigned URL wouldn't recover on retry.
         logger.error(f"Job {job_id} download failed: {exc}")
-        _report_error(result, webhook_url, "transient", f"download_failed: {exc}")
+        _report_error(
+            result, webhook_url, api_client, "transient", f"download_failed: {exc}"
+        )
         return
 
     except Exception as exc:
         logger.error(f"Job {job_id} unexpected error: {exc}")
         if _retries_exhausted():
-            _report_error(result, webhook_url, "transient", str(exc))
+            _report_error(result, webhook_url, api_client, "transient", str(exc))
             return
         raise
 
@@ -322,8 +351,8 @@ def scan_task(
     if report.all_errored:
         if not _retries_exhausted():
             raise ScannerError("all scanners failed transiently")
-        _deliver(result, webhook_url, report, transient_error=True)
+        _deliver(result, webhook_url, api_client, report, transient_error=True)
         return
 
     logger.info(f"Async scan job {job_id} complete. Malware: {report.malware}")
-    _deliver(result, webhook_url, report)
+    _deliver(result, webhook_url, api_client, report)

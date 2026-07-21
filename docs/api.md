@@ -63,8 +63,11 @@ run).
 
 ## `POST /api/v1.0/scan-async` — asynchronous
 
-JSON body describing a file to fetch and scan; the report is delivered to
-`webhook_url` (required).
+JSON body describing a file to fetch and scan. The report is delivered to
+`webhook_url` and, when the result store is enabled (`WORKER_RESULT_TTL > 0`), is
+also retrievable by polling [`GET /api/v1.0/jobs/{job_id}`](#get-apiv10jobsjob_id--poll-a-job).
+`webhook_url` is **required unless the store is enabled** — there must be at least
+one way to get the result.
 
 ```json
 {
@@ -107,7 +110,7 @@ a `3xx` is treated as a failed delivery and retried.
 On success the worker POSTs the report plus the job context:
 
 ```jsonc
-{ "job_id": "…", "filename": "file.pdf", "metadata": {…},
+{ "job_id": "…", "status": "done", "filename": "file.pdf", "metadata": {…},
   "malware": false,
   "scanners": [{"scanner": "clamav", "category": "malware", "kind": "clean", "time": 0.01}] }
 ```
@@ -117,7 +120,30 @@ A **pre-scan** failure (bad host, download error, too large) instead posts
 `error_kind` is `transient` (retryable infra — the service already exhausted its
 own retries) or `file` (permanent property of the file). If *every* scanner fails
 transiently, the report is delivered with `status: error`, `error_kind:
-transient`.
+transient`. `status` is thus `done` on a completed scan and `error` on a failure.
+
+## `GET /api/v1.0/jobs/{job_id}` — poll a job
+
+Optional, off by default. When `WORKER_RESULT_TTL > 0` an async job's result is
+stored (in the broker's Redis, expiring after that many seconds) so a caller can
+poll it instead of — or as a fallback to — the webhook. The webhook stays the
+**primary** channel; polling is the durability path for callers that can't
+receive callbacks or that missed one.
+
+Same Bearer-JWT auth as the scan endpoints (the token binds method + target). A
+job is **owner-scoped**: you can only read a job your own `iss` submitted.
+
+**Response `200`** — the same record the webhook delivers, with a `status`:
+
+```jsonc
+{ "job_id": "…", "status": "pending" }                       // still queued/running
+{ "job_id": "…", "status": "done",  "malware": false, "scanners": [ … ] }  // finished
+{ "job_id": "…", "status": "error", "error_kind": "file", "error": "…" }   // failed
+```
+
+Poll until `status` is `done` or `error`. **`404`** when the job is unknown, has
+expired past its TTL, belongs to another caller, or the store is disabled
+(`WORKER_RESULT_TTL=0`). **`401`** on a bad/missing token.
 
 ## `GET /check` · `GET /` — health
 

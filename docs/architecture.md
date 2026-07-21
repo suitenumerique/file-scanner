@@ -62,32 +62,41 @@ engine. Adding a backend is a new module implementing `Scanner` plus a builder i
 2. Enqueue a dramatiq task and return `202 {job_id, status: pending}`.
 3. The worker re-checks the policy, downloads the URL (SSRF-safe, size- and
    time-bounded), runs the scanners in parallel over the temp file, deletes it,
-   and POSTs the report to `webhook_url`.
+   and POSTs the report to `webhook_url`. When the result store is enabled it
+   also writes the terminal record (see below).
 
 ## Statelessness
 
-Nothing is persisted. A synchronous scan returns its verdict inline; an
-asynchronous scan delivers its verdict **only** through the webhook. The
-`job_id` is a correlation handle, not a key to any store — a caller that needs
-durability is expected to run its own reaper and re-submit lost jobs. This keeps
-the service horizontally scalable and free of a database.
+Stateless by default. A synchronous scan returns its verdict inline; an
+asynchronous scan delivers its verdict through the webhook. The `job_id` is a
+correlation handle echoed in the webhook. With no result store configured nothing
+is persisted — a caller that needs durability runs its own reaper and re-submits
+lost jobs — which keeps the service horizontally scalable and free of a database.
 
-### Forward path: polling
+### Optional result store (polling)
 
-The `job_id` is deliberately part of the contract (returned in the `202` and
-echoed in the webhook) so a future **poll** API is a purely additive change — no
-existing caller breaks:
+Setting `WORKER_RESULT_TTL > 0` turns on a small, TTL-bounded result store
+(`results.py`) so a caller can **poll** `GET /api/v1.0/jobs/{job_id}` instead of —
+or as a fallback to — the webhook. It is deliberately additive: the `job_id` was
+already part of the contract, so no existing caller changes.
 
-1. Add a small result store (e.g. Redis with a TTL) that the worker writes the
-   final `ScanReport` to, keyed by `job_id`, at the same point it POSTs the
-   webhook.
-2. Add `GET /api/v1.0/jobs/{job_id}` returning `{status: pending|done|error, …}`
-   — the same report shape the webhook delivers, or `404` past the TTL.
+1. The store is **dramatiq's own result backend** (`RedisBackend`, in the same
+   Redis as the streams broker; eager mode uses the in-memory `StubBackend`).
+   `results.py` writes/reads a record keyed by `job_id` — dramatiq keys results
+   by message, so a minimal keying `Message` is minted from the `job_id`
+   (`{WORKER_QUEUE_NAMESPACE}:default:scan_task:{job_id}`), expiring after
+   `WORKER_RESULT_TTL` seconds. It drives the backend directly rather than via
+   `store_results=True`, because the record is owner-scoped and pending-aware
+   (and the store must run in the task body, where a worker's return-value
+   auto-capture doesn't). A storage failure is swallowed — it never fails a scan.
+2. The web endpoint seeds a `pending` record on `202`; the worker overwrites it
+   with the terminal `{status: done|error, …}` record at the same point it
+   enqueues the webhook. Records are **owner-scoped** by the caller `iss` (a poll
+   only returns your own jobs, else `404`).
 3. The webhook stays the **primary** delivery channel; polling is the durability
-   / fallback path for callers that can't receive callbacks. Callers that
-   already persist the returned `job_id` can adopt it without any request change.
+   / fallback path. With the store on, `webhook_url` becomes optional (a caller
+   may poll instead); with it off, the service is fully stateless and
+   `webhook_url` is mandatory.
 
-This is intentionally *not* implemented — it trades the current
-database-free/statelessness property for durability, so it should land only when
-a consumer actually needs poll-based delivery. Until then, `job_id` stays a
-correlation handle and the store stays absent.
+This trades the database-free property for durability, so it stays **off by
+default** — enable it only when a consumer needs poll-based delivery.
