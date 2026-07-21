@@ -41,6 +41,13 @@ def test_metrics_label_api_client(auth_client, clamav_cd):
 
 def test_metrics_signature_gauges(client, clamav, monkeypatch):
     monkeypatch.setattr(metrics, "_last_signature_refresh", 0.0)  # bypass the TTL
+    # ``/metrics`` uses ``resolve_scanners()`` to decide which scanners to
+    # refresh, and that reads ``DEFAULT_CATEGORIES`` from settings. An
+    # empty default (env-less CI runs) makes ``resolve_scanners`` raise
+    # ValueError, which the endpoint swallows — no gauge samples emit, and
+    # the assertions below never see them. Pin the default explicitly so
+    # the test is env-agnostic.
+    monkeypatch.setattr(settings, "default_categories", "malware")
     with mock.patch.object(
         clamav, "version", return_value=VersionInfo("27000", "27000", False)
     ):
