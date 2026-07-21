@@ -32,7 +32,7 @@ bootstrap: ## Prepare the project for local development (env + build + start)
 bootstrap: \
 	create-env-files \
 	build \
-	run
+	start
 .PHONY: bootstrap
 
 create-env-files: ## scaffold the gitignored deploy/env/*.local override files

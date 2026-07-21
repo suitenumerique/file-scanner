@@ -81,13 +81,24 @@ def _load_private() -> Ed25519PrivateKey | None:
 def _load_issuers() -> dict[str, Ed25519PublicKey]:
     """Caller ``iss -> public key`` map from ``JWT_ISSUER_KEYS`` — inline
     ``iss:pubkey,iss2:pubkey2`` (each the base64url raw 32-byte Ed25519 public
-    key). The token's ``iss`` selects the key. Empty ⇒ no JWT logins."""
+    key). The token's ``iss`` selects the key. Empty ⇒ no JWT logins.
+
+    A malformed entry (missing ``:`` separator) raises here rather than
+    being silently skipped — a typo like ``JWT_ISSUER_KEYS=drive-pubkey``
+    would otherwise leave the caller absent from the map and turn every
+    request into a 401 with no operational signal on why."""
     keys: dict[str, Ed25519PublicKey] = {}
     for raw_entry in settings.jwt_issuer_keys.split(","):
         entry = raw_entry.strip()
-        if entry and ":" in entry:
-            iss, pub = entry.split(":", 1)
-            keys[iss.strip()] = Ed25519PublicKey.from_public_bytes(_key_bytes(pub))
+        if not entry:
+            continue
+        if ":" not in entry:
+            raise ValueError(
+                f"JWT_ISSUER_KEYS entry {entry!r} is missing the "
+                "'iss:pubkey' separator ':'."
+            )
+        iss, pub = entry.split(":", 1)
+        keys[iss.strip()] = Ed25519PublicKey.from_public_bytes(_key_bytes(pub))
     return keys
 
 

@@ -42,6 +42,14 @@ if not jwt_auth.enabled_incoming():
     )
 
 
+# Async endpoint carries a small JSON metadata payload (url, filename,
+# webhook_url, encryption, metadata). A 64 KiB ceiling is comfortable
+# headroom while capping the memory an unauthenticated caller can force us
+# to buffer before the JWT is even parsed. The sync endpoint (file bytes)
+# has its own ``MAX_UPLOAD_SIZE`` guard and skips this check.
+JSON_MAX_BODY_SIZE = 64 * 1024
+
+
 async def _authenticate(request: Request, *, bind_body: bool) -> str:
     """Authenticate a request via its EdDSA **Bearer JWT** and return the caller
     identity (its ``iss``, used as the metrics ``api_client`` label). The token is
@@ -49,6 +57,14 @@ async def _authenticate(request: Request, *, bind_body: bool) -> str:
     request** — its method + target, plus the body hash when ``bind_body`` (the
     async endpoint, so the ``url``/``webhook_url`` can't be swapped). The sync
     upload's file bytes are never hashed (``bind_body`` is False there)."""
+    # Enforce the body-size cap up front (before crypto work) when we're
+    # going to buffer the body for the ``bh`` binding. Content-Length is
+    # the cheap signal; the post-body length check is defence-in-depth for
+    # chunked encoding or a header that lies about the payload size.
+    if bind_body:
+        cl = request.headers.get("content-length")
+        if cl is not None and cl.isdigit() and int(cl) > JSON_MAX_BODY_SIZE:
+            raise HTTPException(status_code=413, detail="Request body too large")
     authz = request.headers.get("Authorization") or ""
     if not authz.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing bearer token")
@@ -57,7 +73,11 @@ async def _authenticate(request: Request, *, bind_body: bool) -> str:
         method, htu = jwt_auth.request_target(
             request.method, request.url.path, request.url.query
         )
-        body = await request.body() if bind_body else None
+        body: bytes | None = None
+        if bind_body:
+            body = await request.body()
+            if len(body) > JSON_MAX_BODY_SIZE:
+                raise HTTPException(status_code=413, detail="Request body too large")
         jwt_auth.check_binding(
             payload, method=method, htu=htu, body=body, require_body=bind_body
         )
