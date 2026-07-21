@@ -1,42 +1,51 @@
 services:
-  clamav_rest:
-    build: .
+  app:
+    build:
+      context: .
+      target: runtime-dev
     volumes:
-      - ./:/srv/clamav-rest
-      - scan_data:/srv/scan
+      - ./:/app
     ports:
       - 8090:8090
     depends_on:
-      clamd:
+      clamav:
         condition: service_healthy
-      clamav_redis:
+      redis:
         condition: service_started
-    environment:
-      - APP_CONFIG=config.TestConfig
-      - SCAN_DIR=/srv/scan
+    # Dev config lives in deploy/env/ (Messages convention): committed
+    # app.defaults + gitignored app.local overrides (`make create-env-files`).
+    env_file:
+      - deploy/env/app.defaults
+      - deploy/env/app.local
 
-  celery_worker:
-    build: .
-    command: celery -A tasks:celery_app worker --loglevel=info --concurrency=2
+  worker:
+    build:
+      context: .
+      target: runtime-dev
+    command: python -m worker
     volumes:
-      - ./:/srv/clamav-rest
-      - scan_data:/srv/scan
+      - ./:/app
     depends_on:
-      clamd:
+      clamav:
         condition: service_healthy
-      clamav_redis:
+      redis:
         condition: service_started
+    env_file:
+      - deploy/env/app.defaults
+      - deploy/env/app.local
     environment:
-      - APP_CONFIG=config.TestConfig
-      - SCAN_DIR=/srv/scan
+      # Auto-reload the worker on code changes in dev.
+      WORKER_WATCH: /app/src
 
-  clamd:
+  clamav:
     image: clamav/clamav:1.4
+    # clamav publishes amd64 only; pin it so arm64 dev hosts run it emulated
+    # (no-op on amd64 CI). Needs QEMU: `docker run --privileged --rm tonistiigi/binfmt --install amd64`.
+    platform: linux/amd64
     ports:
       - 3310:3310
     volumes:
       - clamav_data:/var/lib/clamav
-      - scan_data:/srv/scan
     healthcheck:
       test: ["CMD", "clamdscan", "--ping", "1"]
       interval: 10s
@@ -44,13 +53,33 @@ services:
       retries: 30
       start_period: 120s
 
-  # Celery broker only — the service is otherwise stateless (async results are
-  # pushed via webhook, nothing is persisted).
-  clamav_redis:
+  # Optional second scanner (profile: exav). exav speaks the clamd protocol and
+  # loads ClamAV's databases, so it shares clamav's downloaded signature volume
+  # (read-only) and needs no updater of its own. Its image is gated/unpublished
+  # today — build from https://github.com/sylvinus/exav or point at your registry.
+  # Bring it up with:  docker compose --profile exav up -d exav
+  # then `make test` runs the exav-marked tests (otherwise they skip).
+  exav:
+    profiles: ["exav"]
+    image: ghcr.io/sylvinus/exav:latest
+    platform: linux/amd64
+    depends_on:
+      clamav:
+        condition: service_healthy
+    env_file:
+      - deploy/env/exav.defaults
+      - deploy/env/exav.local
+    volumes:
+      - clamav_data:/var/lib/clamav:ro
+    ports:
+      - 3311:3310
+
+  # Broker for async scans. Redis 7+ for the dramatiq-redis-streams consumer
+  # groups. The service is otherwise stateless (results are pushed via webhook).
+  redis:
     image: redis:7-alpine
     ports:
       - 6380:6379
 
 volumes:
   clamav_data:
-  scan_data:

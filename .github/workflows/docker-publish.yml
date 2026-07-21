@@ -8,8 +8,11 @@ name: Build and Push Container Image
         required: false
         default: ghcr.io
       image_name:
+        # Optional component suffix. Empty (default) publishes the image under
+        # the bare repository name, e.g. ghcr.io/<owner>/<repo>.
         type: string
-        required: true
+        required: false
+        default: ""
       context:
         type: string
         required: true
@@ -43,7 +46,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ inputs.registry }}/${{ github.repository }}-${{ inputs.image_name }}
+          images: ${{ inputs.registry }}/${{ github.repository }}${{ inputs.image_name != '' && format('-{0}', inputs.image_name) || '' }}
           tags: |
             type=ref,event=branch
             type=semver,pattern={{version}}
@@ -104,7 +107,7 @@ jobs:
       - name: Delete all untagged container images
         uses: actions/delete-package-versions@v5
         with:
-          package-name: ${{ github.event.repository.name }}-${{ inputs.image_name }}
+          package-name: ${{ github.event.repository.name }}${{ inputs.image_name != '' && format('-{0}', inputs.image_name) || '' }}
           package-type: 'container'
           min-versions-to-keep: 0
           delete-only-untagged-versions: true

@@ -9,7 +9,7 @@ name: Build and publish OCI images
       - 'v*'
 
 jobs:
-  docker-publish-scanner:
+  docker-publish:
     uses: ./.github/workflows/docker-publish.yml
     permissions:
       contents: read
@@ -18,5 +18,6 @@ jobs:
       id-token: write
     secrets: inherit
     with:
-      image_name: "scanner"
+      # image_name omitted → published as ghcr.io/<owner>/file-scanner.
       context: "."
+      target: "runtime-distroless-prod"

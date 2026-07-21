@@ -1,0 +1,32 @@
+# Dev defaults for the file-scanner app + worker (docker compose).
+#
+# Committed, dev-safe values. Local overrides go in deploy/env/app.local
+# (gitignored; `make create-env-files` scaffolds it). Every variable is
+# documented in src/config.py; production sets real values via its own env.
+
+# Run the real ProductionConfig (non-eager worker, real broker) so the async
+# flow works end to end in dev.
+APP_CONFIG=config.ProductionConfig
+
+# Auth is JWT-only. THROWAWAY dev keys — replace all of these for anything real
+# (see docs/deployment.md#authentication). The caller "dev-issuer" is trusted via its
+# public key here; the matching private key is in the README quick start, used to
+# mint request tokens. JWT_SIGNING_KEY signs webhooks and backs /.well-known/jwks.json.
+JWT_ISSUER_KEYS=dev-issuer:8sicDCDZLZY5SPNNjr4aBwwh0Dyrqr7Ca9neK_nA6Eg
+JWT_SIGNING_KEY=uGyAqjXdgjOXWLLzChBCzgzzvUUJcSsy6-ctdhqeHhM
+JWT_SIGNING_KID=dev-1
+
+# Scanner + broker (container DNS names on the compose network).
+CLAMAV_HOSTS=clamav:3310
+# exav is optional (profile: exav); configured so its tests run when it's up.
+EXAV_HOSTS=exav:3310
+WORKER_BROKER_URL=redis://redis:6379/0
+
+# Enable the async result store in dev (1h TTL) so GET /api/v1.0/jobs/{job_id}
+# works out of the box; production leaves it at 0 (stateless) unless a consumer
+# needs polling.
+WORKER_RESULT_TTL=3600
+
+# Queue dashboard at http://localhost:8090/dashboard (any username / this
+# password). A password enables it; unset it to keep /dashboard absent.
+WORKER_DASHBOARD_PASSWORD=dev-dashboard-password
