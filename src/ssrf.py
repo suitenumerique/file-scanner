@@ -270,7 +270,10 @@ class SSRFSafeSession:
         later hop. The HTTP method and body are preserved across hops. An
         HTTPS→HTTP downgrade is refused.
         """
-        kwargs.pop("allow_redirects", None)
+        # Honour allow_redirects=False (default True): stop after the first
+        # still-SSRF-validated hop and return any redirect response as-is — used
+        # for webhook callbacks, which must not redirect.
+        follow_redirects = kwargs.pop("allow_redirects", True)
 
         current_url = url
         for _ in range(MAX_REDIRECTS + 1):
@@ -280,7 +283,10 @@ class SSRFSafeSession:
                 current_url, timeout=timeout, allow_redirects=False, **kwargs
             )
 
-            if response.status_code not in REDIRECT_STATUS_CODES:
+            if (
+                not follow_redirects
+                or response.status_code not in REDIRECT_STATUS_CODES
+            ):
                 return response
 
             location = response.headers.get("Location")

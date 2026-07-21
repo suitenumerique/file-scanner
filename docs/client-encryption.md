@@ -43,7 +43,7 @@ order. Each stored chunk is:
   "encryption": {
     "scheme": "aes-256-gcm-chunked-v1",  // optional; this is the default
     "key": "<url-safe base64 AES-256 key, 43 chars unpadded>",
-    "chunk_size": 65536,        // PLAINTEXT bytes per chunk; 4096 .. 16777216 (16 MiB)
+    "chunk_size": 65536,        // PLAINTEXT bytes per chunk; 4 KiB .. 50 MiB by default
     "file_id": "abc123",        // the AAD prefix; matches what you encrypted with
     "parts": 5                  // total number of chunks
   }
@@ -65,9 +65,12 @@ The `key` is URL-safe base64 (`A–Z a–z 0–9 - _`, optional `=` padding) of 
   ever reused under the same key — reuse leaks plaintext and lets tags be forged.
   Generate a fresh CSPRNG IV for every chunk. The service cannot detect reuse.
 - **`chunk_size` is the plaintext size**, not the stored size; the stored chunk
-  is `chunk_size + 28` bytes (IV + tag) except the last. It must be **4 KiB – 16
-  MiB**: the worker buffers one whole chunk in memory (upper bound), and a tiny
-  chunk_size would inflate the chunk count into a CPU cost (lower bound).
+  is `chunk_size + 28` bytes (IV + tag) except the last. By default it must be
+  **4 KiB – 50 MiB** (configurable per deployment via `ENCRYPTION_MIN_CHUNK_SIZE`
+  / `ENCRYPTION_MAX_CHUNK_SIZE`): the worker buffers one whole chunk in memory
+  (upper bound), and a tiny chunk_size would inflate the chunk count into a CPU
+  cost (lower bound). Only the *uniform* `chunk_size` is bounded — the final
+  chunk may be as small as one byte.
 - The download size limit (`MAX_URL_SIZE`) counts **ciphertext** bytes.
 
 ## Key handling

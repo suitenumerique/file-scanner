@@ -12,21 +12,11 @@ services:
         condition: service_healthy
       redis:
         condition: service_started
-    environment: &app_env
-      # Dev runs the real production config (non-eager worker, real broker) so
-      # the async flow actually works end to end. API_KEYS uses the throwaway
-      # test key; override for anything real.
-      APP_CONFIG: config.ProductionConfig
-      API_KEYS: "drive:test-key-not-for-production"
-      CLAMAV_HOST: clamav
-      CLAMAV_PORT: "3310"
-      # exav is optional (profile: exav). Configured here so the exav tests can
-      # run when it's up; they skip when it's unreachable.
-      EXAV_HOSTS: exav:3310
-      WORKER_BROKER_URL: redis://redis:6379/0
-      # Serve the queue dashboard at http://localhost:8090/dashboard (admin / …).
-      # A password enables it; unset it to keep /dashboard absent.
-      WORKER_DASHBOARD_PASSWORD: dev-dashboard-password
+    # Dev config lives in deploy/env/ (Messages convention): committed
+    # app.defaults + gitignored app.local overrides (`make create-env-files`).
+    env_file:
+      - deploy/env/app.defaults
+      - deploy/env/app.local
 
   worker:
     build:
@@ -40,8 +30,10 @@ services:
         condition: service_healthy
       redis:
         condition: service_started
+    env_file:
+      - deploy/env/app.defaults
+      - deploy/env/app.local
     environment:
-      <<: *app_env
       # Auto-reload the worker on code changes in dev.
       WORKER_WATCH: /app/src
 
@@ -74,8 +66,9 @@ services:
     depends_on:
       clamav:
         condition: service_healthy
-    environment:
-      CLAMAV_NO_FRESHCLAMD: "true" # load the shared DB, don't self-update
+    env_file:
+      - deploy/env/exav.defaults
+      - deploy/env/exav.local
     volumes:
       - clamav_data:/var/lib/clamav:ro
     ports:

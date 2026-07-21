@@ -386,7 +386,7 @@ def run_scanners(names: list[str], open_file, api_client: str = "") -> ScanRepor
 
     ``open_file`` is a callable returning a fresh readable file positioned at 0 —
     each scanner gets its own handle (so clamav and exav can stream in parallel).
-    ``api_client`` is the calling service (API_KEYS name), recorded as a metric
+    ``api_client`` is the calling service (JWT ``iss``), recorded as a metric
     label. A scanner that fails transiently becomes an ``error`` result rather
     than aborting the others. Results keep ``names`` order.
     """

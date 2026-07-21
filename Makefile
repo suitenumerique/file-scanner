@@ -28,15 +28,33 @@ default: help
 
 # -- Project
 
-bootstrap: ## Prepare the project for local development (build + start)
+bootstrap: ## Prepare the project for local development (env + build + start)
 bootstrap: \
+	create-env-files \
 	build \
 	run
 .PHONY: bootstrap
 
+create-env-files: ## scaffold the gitignored deploy/env/*.local override files
+create-env-files: \
+	deploy/env/app.local \
+	deploy/env/exav.local
+.PHONY: create-env-files
+
+deploy/env/%.local:
+	@echo "# Local development overrides for '$*' (gitignored)." > $@
+	@echo "# Add KEY=value lines to override deploy/env/$*.defaults." >> $@
+
+new-issuer: ## generate an Ed25519 keypair for a new JWT issuer (NAME=<iss>)
+new-issuer: create-env-files
+	@test -n "$(NAME)" || { echo "usage: make new-issuer NAME=<issuer>"; exit 2; }
+	@$(COMPOSE_RUN) --no-deps app python deploy/scripts/new-issuer.py "$(NAME)"
+.PHONY: new-issuer
+
 # -- Docker/compose
 
 build: ## build the docker images
+build: create-env-files
 	@$(COMPOSE) build
 .PHONY: build
 
@@ -44,10 +62,11 @@ logs: ## follow the app & worker logs
 	@$(COMPOSE) logs -f app worker
 .PHONY: logs
 
-run: ## start the full stack (app + worker + clamav + redis) in the background
+start: ## start the full stack (app + worker + clamav + redis) in the background
+start: create-env-files
 	@$(COMPOSE) up -d --wait app worker
 	@echo "$(GREEN)Service up on http://localhost:8090$(RESET) — waiting on clamav's DB can take a minute (make logs)."
-.PHONY: run
+.PHONY: start
 
 stop: ## stop the stack
 	@$(COMPOSE) down
@@ -74,6 +93,7 @@ lint-fix: ## auto-fix lint + format issues
 .PHONY: lint-fix
 
 test: ## run the test suite (in the app container, against clamav)
+test: create-env-files
 	@$(COMPOSE_RUN) -e APP_CONFIG=config.TestConfig app python -m pytest
 .PHONY: test
 

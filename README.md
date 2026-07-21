@@ -21,10 +21,10 @@ response; an asynchronous scan delivers its verdict only via a webhook callback.
 
 | Method | Path | Auth | Purpose |
 | --- | --- | --- | --- |
-| `POST` | `/api/v1.0/scan` | `X-API-Key` | Synchronous scan of an uploaded file → per-category + per-scanner report. |
-| `POST` | `/api/v1.0/scan-async` | `X-API-Key` | Async scan of a file fetched from a URL; result delivered to a webhook. |
-| `POST` | `/v2/scan-async` | `X-API-Key` | Deprecated alias of `scan-async` (used by suitenumerique/transfers). |
+| `POST` | `/api/v1.0/scan` | JWT | Synchronous scan of an uploaded file → per-category + per-scanner report. |
+| `POST` | `/api/v1.0/scan-async` | JWT | Async scan of a file fetched from a URL; result delivered to a webhook. |
 | `GET`  | `/check`, `/` | — | Liveness: `200 Service OK` when the scanners answer, else `503`. |
+| `GET`  | `/.well-known/jwks.json` | — | Webhook-signing public key(s) (JWK Set) for receivers to verify signed callbacks. |
 | `GET`  | `/metrics` | — | Prometheus exposition, incl. signature freshness (see [Monitoring](#monitoring)). |
 
 Full request/response schemas: [docs/api.md](docs/api.md).
@@ -34,15 +34,27 @@ Full request/response schemas: [docs/api.md](docs/api.md).
 Requires Docker. `make help` lists every target.
 
 ```bash
-make bootstrap                 # build & start app + worker + clamav + redis
+make bootstrap                 # scaffold env files + build + start app + worker + clamav + redis
 docker compose logs -f clamav  # wait for the signature database to load
 ```
 
-Scan the harmless EICAR test file (the default dev key is `test-key-not-for-production`):
+`make bootstrap` is the one-time setup; afterwards use `make start` / `make stop`
+to bring the stack up and down (both read config from `deploy/env/`, see
+[Configuration](docs/deployment.md#configuration)).
+
+Scan the harmless EICAR test file. Auth is a **request-bound JWT** ([Auth &
+callers](#auth--callers)), so mint a short-lived token for the throwaway dev
+caller `dev-issuer` with the `mint-token.py` helper (run in the app container) and
+send it as a Bearer token:
 
 ```bash
-curl -sf -H "X-API-Key: test-key-not-for-production" \
-     -F "file=@client-examples/eicar.txt" \
+printf '%s' 'X5O!P%@AP[4\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*' > /tmp/eicar.txt
+
+# Throwaway dev private key for caller "dev-issuer" (matches JWT_ISSUER_KEYS in deploy/env/app.defaults).
+DEV_PRIV=Higc3cLT742BJB5GiPnW5Ypg0xCGoVYY-s07ssMVlsg
+TOKEN=$(docker compose exec -T app python deploy/scripts/mint-token.py "$DEV_PRIV" dev-issuer POST /api/v1.0/scan)
+
+curl -sf -H "Authorization: Bearer $TOKEN" -F "file=@/tmp/eicar.txt" \
      http://localhost:8090/api/v1.0/scan
 # {"malware": true,
 #  "scanners": [{"scanner": "clamav", "category": "malware", "kind": "malware",
@@ -52,6 +64,7 @@ curl -sf -H "X-API-Key: test-key-not-for-production" \
 ```bash
 make test      # run the test suite in docker
 make lint      # ruff check + format check
+make start     # (re)start the stack after the initial bootstrap
 make stop      # stop the stack
 ```
 
@@ -59,30 +72,45 @@ make stop      # stop the stack
 
 | Service | URL / Port | Description | Credentials |
 | --- | --- | --- | --- |
-| **app** (web) | [http://localhost:8090](http://localhost:8090) | FastAPI REST API + `/metrics` | API key `test-key-not-for-production` |
+| **app** (web) | [http://localhost:8090](http://localhost:8090) | FastAPI REST API + `/metrics` | JWT — dev caller `dev-issuer` (throwaway key, see [Auth & callers](#auth--callers)) |
 | **worker** | — | dramatiq worker (async scans) | — |
 | **clamav** | `localhost:3310` | ClamAV / exav daemon (clamd protocol) | none |
 | **redis** | `localhost:6380` | dramatiq broker (Redis Streams) | none |
 
-## API keys & callers
+## Auth & callers
 
-Access is by `X-API-Key`. Keys are configured through `API_KEYS` as a
-comma-separated list of `name:key` pairs, where `name` identifies the calling
-service in the logs (e.g. `drive`, `transfers`):
+Scan endpoints authenticate with a short-lived **EdDSA (Ed25519) Bearer JWT**.
+Callers sign the token with their *private* key; the service verifies it with
+their *public* key, selected by the token's **`iss`** claim (which also
+identifies the caller in logs and the `api_client` metric, e.g. `drive`,
+`transfers`). Because the service stores only public keys, a leak of its config
+can't forge caller tokens.
+
+Configure the accepted callers with `JWT_ISSUER_KEYS` — `iss:pubkey` pairs, each
+the base64url raw Ed25519 public key:
 
 ```env
-API_KEYS="drive:s3cr3t-key,transfers:other-key"
+JWT_ISSUER_KEYS="drive:<drive-pubkey>,transfers:<transfers-pubkey>"
 ```
 
-Requests without a valid key get `401`; keys are compared in constant time. The
-dev compose ships `drive:test-key-not-for-production`.
+Onboard a new caller with **`make new-issuer NAME=<iss>`** — it generates an
+Ed25519 keypair and prints the caller's private key (hand it over securely) plus
+the `iss:pubkey` line to append here.
+
+The token **binds the request** — method + target, plus a SHA-256 of the JSON
+body on the async endpoint — so a captured token can't be replayed on a
+different call or with a swapped `webhook_url`. Mint one per request (see the
+[quick start](#quick-start) for a dev example). Outgoing webhooks are signed with
+the service's own key (`JWT_SIGNING_KEY`) and are verifiable at
+`/.well-known/jwks.json`. Requests without a valid token get `401`. Full model:
+[docs/security.md](docs/security.md#authentication).
 
 ## Monitoring
 
 - **`GET /metrics`** exposes Prometheus metrics: default process metrics plus
   `filescanner_scans_total{scanner,category,verdict,api_client}` and
   `filescanner_scan_duration_seconds{scanner,api_client}` (`api_client` is the
-  calling service's `API_KEYS` name, so scans break down per consumer). Set
+  calling service's JWT `iss`, so scans break down per consumer). Set
   **`PROMETHEUS_API_KEY`** to require `Authorization: Bearer <key>` (unset = open,
   so isolate it at the network layer — and note the `api_client` label exposes
   caller identities). Sync scans are counted in the web process; the worker
@@ -111,9 +139,10 @@ dev compose ships `drive:test-key-not-for-production`.
 ```text
 src/               application code (FastAPI app, scanners, dramatiq worker, SSRF guard, …)
 tests/             pytest suite (one file per area)
-deploy/            distroless build helpers (strip-python.sh)
+deploy/env/        per-service env files: committed *.defaults + gitignored *.local (make create-env-files)
+deploy/scripts/    dev/ops CLIs: JWT issuer keygen (new-issuer.py) + token minting (mint-token.py)
+deploy/docker/     image build helpers (strip-python.sh)
 docs/              reference documentation (see below)
-client-examples/   sample files (EICAR, protected archive, macro) and a curl example
 ```
 
 ## Stack

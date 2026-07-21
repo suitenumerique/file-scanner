@@ -46,7 +46,7 @@ engine. Adding a backend is a new module implementing `Scanner` plus a builder i
 
 ### Synchronous — `POST /api/v1.0/scan`
 
-1. Authenticate (`X-API-Key`, constant-time); resolve `categories` ∪ `scanners`
+1. Authenticate (request-bound Bearer JWT); resolve `categories` ∪ `scanners`
    into a scanner set (`DEFAULT_CATEGORIES` if neither is named).
 2. Reject oversized uploads (`413`); read the file once.
 3. `run_scanners` streams it to every selected scanner **in parallel** (each its

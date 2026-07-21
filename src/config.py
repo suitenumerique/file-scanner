@@ -1,45 +1,55 @@
-"""Application configuration.
+"""Application configuration (pydantic-settings).
 
-Every knob is a field on :class:`Settings`, documented inline below with its
-environment variable (in parentheses) and units. ``APP_CONFIG`` selects a
-profile from ``CONFIGS``: ``config.ProductionConfig`` (default) reads everything
-from the environment; the ``Test`` / ``Ci`` / ``Local`` profiles are static and
-run "eager" (no Redis / worker). Get the active settings via
+Every knob is a field on :class:`Settings` with its default — the **single**
+source of truth. In production (``config.ProductionConfig``) each field is read
+from the environment variable of the same name (upper-cased), falling back to the
+field default; nothing is restated. ``APP_CONFIG`` selects a profile from
+``CONFIGS``; the ``Test`` / ``Ci`` / ``Local`` profiles **ignore the ambient
+environment** (so tests are deterministic regardless of what the container
+injects) and run "eager" (no Redis / worker). Get the active settings via
 :func:`get_settings`.
 """
 
 import os
-from dataclasses import dataclass
+
+from pydantic_settings import (
+    BaseSettings,
+    PydanticBaseSettingsSource,
+    SettingsConfigDict,
+)
+
+# These change safety-relevant behaviour (``testing`` relaxes the request-time
+# SSRF guard; ``worker_eager`` bypasses the real broker), so they are set ONLY by
+# the profile class and never read from the ambient environment — not even in
+# production, where an accidental ``TESTING=true`` must not take effect.
+_PROFILE_ONLY = frozenset({"testing", "worker_eager"})
 
 
-def _int_env(name: str, default: int) -> int:
-    """Read an integer env var, falling back to ``default`` when unset/empty."""
-    raw = os.environ.get(name)
-    if raw is None or raw == "":
-        return default
-    try:
-        return int(raw)
-    except ValueError as exc:
-        raise RuntimeError(f"{name} must be an integer, got {raw!r}") from exc
+class _DropEnvKeys:
+    """Wrap the env settings source to hide a few field names from it."""
+
+    def __init__(self, source: PydanticBaseSettingsSource, drop: frozenset[str]):
+        self._source, self._drop = source, drop
+
+    def __call__(self) -> dict:
+        return {k: v for k, v in self._source().items() if k not in self._drop}
 
 
-@dataclass
-class Settings:
+class Settings(BaseSettings):
+    """Production settings — every field read from its upper-cased env var."""
+
+    model_config = SettingsConfigDict(case_sensitive=False, extra="ignore")
+
     # --- Runtime profile ---
     # Verbose (DEBUG) logging when true.
     debug: bool = False
     # Test/CI mode: relaxes a few guards that need real infrastructure — the
     # request-time SSRF check is skipped (the worker still enforces it) and tasks
-    # may run eagerly. NEVER enable in production.
+    # may run eagerly. Set only by a profile; NEVER enable in production.
     testing: bool = False
 
-    # --- Authentication ---
-    # Accepted API keys as a comma-separated list of ``name:key`` pairs; ``name``
-    # identifies the caller in logs. Empty = every request is rejected. (API_KEYS)
-    api_keys: str = ""
-
     # --- Web server ---
-    host: str = "0.0.0.0"  # interface uvicorn binds to
+    host: str = "0.0.0.0"  # interface uvicorn binds to (HOST)
     port: int = 8090  # web server port (PORT)
 
     # --- Metrics ---
@@ -96,17 +106,45 @@ class Settings:
     jcop_submit_timeout: int = 600  # total budget (s) for submit + polling
     jcop_poll_interval: int = 5  # delay (s) between result polls
 
+    # --- JWT authentication (both directions; EdDSA / Ed25519) ---
+    # OUTGOING: base64url of our raw 32-byte Ed25519 private seed, used to sign
+    # webhook callbacks. The public half is DERIVED at boot and served at
+    # /.well-known/jwks.json — never stored separately (a fixed private key
+    # yields a fixed public key). Empty ⇒ webhooks are sent unsigned and the
+    # JWKS is empty. (JWT_SIGNING_KEY)
+    jwt_signing_key: str = ""
+    # Key id advertised in the JWKS + webhook token headers so receivers can
+    # match keys across a rotation. (JWT_SIGNING_KID)
+    jwt_signing_kid: str = ""
+    # The `iss` we stamp on outgoing webhook tokens (our service identity).
+    # (JWT_ISSUER)
+    jwt_issuer: str = "file-scanner"
+    # INCOMING: caller public keys, inline as `iss:pubkey,iss2:pubkey2` (each the
+    # base64url raw 32-byte Ed25519 public key). The token's `iss` selects the
+    # key and identifies the caller in logs + the `api_client` metric. Empty ⇒ no
+    # caller can authenticate (every request is rejected). (JWT_ISSUER_KEYS)
+    jwt_issuer_keys: str = ""
+    # Expected `aud` on incoming tokens (this service's identity). (JWT_AUDIENCE)
+    jwt_audience: str = "file-scanner"
+    # Hard cap on an incoming token's lifetime (`exp - iat`), seconds — bounds the
+    # replay window of a captured token. Also the TTL of the tokens we mint for
+    # webhooks. (JWT_MAX_AGE)
+    jwt_max_age: int = 300
+    # Clock-skew leeway (seconds) applied to exp/iat/nbf. (JWT_LEEWAY)
+    jwt_leeway: int = 60
+
     # --- Size & time limits ---
     # Max size of a direct upload to /api/v1.0/scan; larger → 413. (MAX_UPLOAD_SIZE)
     max_upload_size: int = 100 * 1024 * 1024  # 100 MiB
-    # Max size of a file fetched by /v2/scan-async; enforced against both
+    # Max size of a file fetched by /api/v1.0/scan-async; enforced against both
     # Content-Length and the bytes actually streamed. (MAX_URL_SIZE)
     max_url_size: int = 2 * 1024 * 1024 * 1024  # 2 GiB
     # Scratch directory the async worker downloads a file into before streaming
-    # it to the scanner (INSTREAM). Transient — each file is deleted right after
-    # the scan — and NOT shared with the scanner daemon, so any writable path
-    # works. (SCAN_DIR)
-    scan_dir: str = os.environ.get("SCAN_DIR", "/tmp/file-scanner")
+    # it to the scanner (INSTREAM) — it holds the download, not the scan (which
+    # happens over the socket). Transient (each file is deleted right after the
+    # scan) and NOT shared with the scanner daemon, so any writable path works.
+    # (DOWNLOAD_DIR)
+    download_dir: str = "/tmp/file-scanner"
     # Per-read (socket) timeout on the async download — caps time between chunks,
     # not the whole transfer. (URL_DOWNLOAD_TIMEOUT)
     url_download_timeout: int = 30  # seconds
@@ -115,9 +153,22 @@ class Settings:
     # (DOWNLOAD_MAX_SECONDS)
     download_max_seconds: int = 300  # seconds
 
+    # --- Client-encryption chunking (see docs/client-encryption.md) ---
+    # Bounds the caller-declared `chunk_size` (plaintext bytes per AES-GCM chunk).
+    # Floor: a tiny chunk_size inflates the chunk count into a per-chunk CPU cost
+    # (millions of tiny GCM decrypts). Ceiling: the worker buffers one whole chunk
+    # in RAM before decrypting, so this caps per-decryption memory (x worker
+    # concurrency) — raise it knowingly. A caller aligning crypto chunks to S3
+    # multipart parts wants chunk_size >= the S3 5 MiB minimum, so the 50 MiB
+    # ceiling comfortably covers typical part sizes.
+    # (ENCRYPTION_MIN_CHUNK_SIZE)
+    encryption_min_chunk_size: int = 4096  # 4 KiB
+    # (ENCRYPTION_MAX_CHUNK_SIZE)
+    encryption_max_chunk_size: int = 50 * 1024 * 1024  # 50 MiB
+
     # --- Host policy (async scans) ---
     # Positive restriction: if set, ONLY these hostnames may be submitted to
-    # /v2/scan-async (comma-separated). Empty = any host, still subject to
+    # /api/v1.0/scan-async (comma-separated). Empty = any host, still subject to
     # the SSRF guard below. (ALLOWED_URL_HOSTS)
     allowed_url_hosts: str = ""
     # SSRF allowlist: hostnames trusted to resolve to a private/internal address
@@ -154,94 +205,82 @@ class Settings:
 
     # --- Background tasks (dramatiq) ---
     # Eager mode: run tasks synchronously, in-process, with an in-memory stub
-    # broker — no Redis and no worker needed. On for the test/CI/local profiles.
+    # broker — no Redis and no worker needed. Set only by a profile.
     worker_eager: bool = False
-    # Redis URL for the dramatiq-redis-streams broker (async scans). (WORKER_BROKER_URL)
+    # Redis URL for the dramatiq-redis-streams broker (async scans). Supports
+    # TLS + auth, e.g. rediss://:password@host:6379/0. (WORKER_BROKER_URL)
     worker_broker_url: str = "redis://localhost:6379/0"
     # Redis key prefix for the streams broker; set a distinct value to isolate
     # multiple deployments sharing one Redis. (WORKER_QUEUE_NAMESPACE)
     worker_queue_namespace: str = "file-scanner"
 
-
-TEST_API_KEY = "test-key-not-for-production"
-
-
-def _production() -> Settings:
-    """Production settings, fully driven by environment variables."""
-    return Settings(
-        port=_int_env("PORT", 8090),
-        prometheus_api_key=os.environ.get("PROMETHEUS_API_KEY", ""),
-        api_keys=os.environ.get("API_KEYS", ""),
-        default_scanners=os.environ.get("DEFAULT_SCANNERS", '{"malware": ["clamav"]}'),
-        default_categories=os.environ.get("DEFAULT_CATEGORIES", "malware"),
-        clamav_txt_uri=os.environ.get("CLAMAV_TXT_URI", "current.cvd.clamav.net"),
-        clamav_socket=os.environ.get("CLAMAV_SOCKET", ""),
-        clamav_host=os.environ.get("CLAMAV_HOST", "clamav"),
-        clamav_port=_int_env("CLAMAV_PORT", 3310),
-        clamav_timeout=_int_env("CLAMAV_TIMEOUT", 300),
-        clamav_hosts=os.environ.get("CLAMAV_HOSTS", ""),
-        exav_hosts=os.environ.get("EXAV_HOSTS", ""),
-        jcop_base_url=os.environ.get("JCOP_BASE_URL", ""),
-        jcop_api_key=os.environ.get("JCOP_API_KEY", ""),
-        jcop_result_timeout=_int_env("JCOP_RESULT_TIMEOUT", 30),
-        jcop_submit_timeout=_int_env("JCOP_SUBMIT_TIMEOUT", 600),
-        jcop_poll_interval=_int_env("JCOP_POLL_INTERVAL", 5),
-        worker_broker_url=os.environ.get(
-            "WORKER_BROKER_URL", "redis://localhost:6379/0"
-        ),
-        worker_queue_namespace=os.environ.get("WORKER_QUEUE_NAMESPACE", "file-scanner"),
-        worker_dashboard_user=os.environ.get("WORKER_DASHBOARD_USER", ""),
-        worker_dashboard_password=os.environ.get("WORKER_DASHBOARD_PASSWORD", ""),
-        worker_dashboard_path=os.environ.get("WORKER_DASHBOARD_PATH", "/dashboard"),
-        worker_dashboard_allowed_ips=os.environ.get("WORKER_DASHBOARD_ALLOWED_IPS", ""),
-        worker_dashboard_forwarded_ip_header=os.environ.get(
-            "WORKER_DASHBOARD_FORWARDED_IP_HEADER", ""
-        ),
-        scan_dir=os.environ.get("SCAN_DIR", "/tmp/file-scanner"),
-        max_upload_size=_int_env("MAX_UPLOAD_SIZE", 100 * 1024 * 1024),
-        max_url_size=_int_env("MAX_URL_SIZE", 2 * 1024 * 1024 * 1024),
-        url_download_timeout=_int_env("URL_DOWNLOAD_TIMEOUT", 30),
-        download_max_seconds=_int_env("DOWNLOAD_MAX_SECONDS", 300),
-        allowed_url_hosts=os.environ.get("ALLOWED_URL_HOSTS", ""),
-        ssrf_allowed_hosts=os.environ.get("SSRF_ALLOWED_HOSTS", ""),
-        webhook_timeout=_int_env("WEBHOOK_TIMEOUT", 10),
-        webhook_max_attempts=_int_env("WEBHOOK_MAX_ATTEMPTS", 3),
-    )
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls,
+        init_settings,
+        env_settings,
+        dotenv_settings,
+        file_secret_settings,
+    ):
+        # Same precedence as the default (init > env > dotenv > secrets), but the
+        # env source can't set the profile-only flags.
+        return (
+            init_settings,
+            _DropEnvKeys(env_settings, _PROFILE_ONLY),
+            dotenv_settings,
+            file_secret_settings,
+        )
 
 
+class _StaticSettings(Settings):
+    """Base for the non-production profiles: values come only from field defaults
+    and explicit overrides — the ambient environment is ignored entirely, so the
+    test suite is deterministic no matter what the container/compose injects."""
+
+    @classmethod
+    def settings_customise_sources(cls, settings_cls, init_settings, **_):
+        return (init_settings,)
+
+
+class TestConfig(_StaticSettings):
+    debug: bool = True
+    testing: bool = True
+    worker_eager: bool = True
+    clamav_host: str = "clamav"
+    max_upload_size: int = 4999999
+    max_url_size: int = 4999999
+    # Opt-in: point the exav backend at a running daemon to exercise the exav
+    # integration tests (they skip when unset/unreachable). Read from the env
+    # directly since this profile otherwise ignores it.
+    exav_hosts: str = os.environ.get("EXAV_HOSTS", "")
+
+
+class CiConfig(_StaticSettings):
+    debug: bool = True
+    testing: bool = True
+    worker_eager: bool = True
+    clamav_host: str = "localhost"
+    max_upload_size: int = 4999999
+    max_url_size: int = 4999999
+    exav_hosts: str = os.environ.get("EXAV_HOSTS", "")
+
+
+class LocalConfig(_StaticSettings):
+    debug: bool = True
+    testing: bool = True
+    worker_eager: bool = True
+    clamav_host: str = "localhost"
+    max_upload_size: int = 4999999
+    max_url_size: int = 4999999
+
+
+# Built once at import (a singleton per profile, shared across modules).
 CONFIGS = {
-    "config.ProductionConfig": _production(),
-    "config.TestConfig": Settings(
-        debug=True,
-        testing=True,
-        worker_eager=True,
-        clamav_host="clamav",
-        # Optional: point the exav backend at a running exav daemon to exercise
-        # the exav integration tests (they skip when it's unset/unreachable).
-        exav_hosts=os.environ.get("EXAV_HOSTS", ""),
-        max_upload_size=4999999,
-        max_url_size=4999999,
-        api_keys=f"drive:{TEST_API_KEY}",
-    ),
-    "config.CiConfig": Settings(
-        debug=True,
-        testing=True,
-        worker_eager=True,
-        clamav_host="localhost",
-        exav_hosts=os.environ.get("EXAV_HOSTS", ""),
-        max_upload_size=4999999,
-        max_url_size=4999999,
-        api_keys=f"drive:{TEST_API_KEY}",
-    ),
-    "config.LocalConfig": Settings(
-        debug=True,
-        testing=True,
-        worker_eager=True,
-        clamav_host="localhost",
-        max_upload_size=4999999,
-        max_url_size=4999999,
-        api_keys=f"drive:{TEST_API_KEY}",
-    ),
+    "config.ProductionConfig": Settings(),
+    "config.TestConfig": TestConfig(),
+    "config.CiConfig": CiConfig(),
+    "config.LocalConfig": LocalConfig(),
 }
 
 

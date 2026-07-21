@@ -1,0 +1,21 @@
+# GitGuardian / ggshield configuration.
+#
+# This repo intentionally commits a few THROWAWAY dev credentials so
+# `make bootstrap` works with zero setup (the deploy/env/*.defaults convention).
+# They grant access to nothing and are never used outside local development, so
+# they're ignored here to keep secret-scanning signal high.
+#
+# ⚠️  NEVER add a real secret to an ignored path or match. Real production
+#     secrets are supplied via the environment / a gitignored deploy/env/*.local.
+version: 2
+
+secret:
+  ignored-paths:
+    # Committed dev defaults hold only throwaway keys/passwords (the matching
+    # private keys are equally throwaway — see the README quick start).
+    - "deploy/env/*.defaults"
+  ignored-matches:
+    - name: "Throwaway dev 'dev-issuer' Ed25519 private key (README quick start)"
+      match: "Higc3cLT742BJB5GiPnW5Ypg0xCGoVYY-s07ssMVlsg"
+    - name: "Throwaway dev queue-dashboard password (README + docs)"
+      match: "dev-dashboard-password"

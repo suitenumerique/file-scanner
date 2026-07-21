@@ -1,7 +1,7 @@
 import contextlib
+import json
 import logging
 import os
-import time
 import timeit
 import uuid
 
@@ -9,6 +9,7 @@ import requests as http_requests
 from dramatiq.middleware import CurrentMessage
 
 import encryption
+import jwt_auth
 from broker import register_task
 from config import get_settings
 from scanner import ScannerError, run_scanners
@@ -19,7 +20,7 @@ logger = logging.getLogger("file-scanner")
 
 settings = get_settings()
 
-os.makedirs(settings.scan_dir, exist_ok=True)
+os.makedirs(settings.download_dir, exist_ok=True)
 
 # One SSRF-protected HTTP client for both the download and the webhook: it pins
 # the resolved IP (no DNS-rebinding window) and re-validates every redirect hop.
@@ -42,42 +43,64 @@ def _retries_exhausted() -> bool:
     return msg.options.get("retries", 0) >= MAX_RETRIES
 
 
-def _send_webhook(webhook_url, payload):
-    """Best-effort push of the scan result to the caller.
+@register_task(
+    max_retries=settings.webhook_max_attempts,
+    min_backoff=1_000,
+    max_backoff=60_000,
+)
+def deliver_webhook(webhook_url, payload):
+    """Push one scan result to the caller's webhook — its own retriable task.
 
-    The service is stateless: nothing is persisted, so the webhook is the ONLY
-    delivery channel for an async scan. A few retries with back-off; if it
-    never lands, the result is lost and the caller's own reaper is expected to
-    re-submit.
+    The service is stateless, so the webhook is the ONLY delivery channel for an
+    async scan; it must be as durable as the scan itself. Rather than a blocking
+    in-line retry loop inside ``scan_task`` (which would re-download and re-scan
+    on the heavy scanner tier just because a receiver blipped, and would dead-
+    letter the scan args — including the decryption key — on failure), delivery
+    is a *separate* actor: ``scan_task`` computes the report once and enqueues
+    this. One HTTP attempt per invocation; a transient failure re-raises so
+    dramatiq retries with back-off and, once the budget is spent, dead-letters
+    the message. The dead-lettered payload is the report only — it carries no
+    decryption key — so it is safe to inspect/replay from the queue dashboard.
+
+    A blocked/unsafe webhook host is *permanent* (it won't become safe on
+    retry), so it is logged and dropped rather than retried.
     """
-    for attempt in range(1, settings.webhook_max_attempts + 1):
-        try:
-            resp = _session.post(
-                webhook_url, timeout=settings.webhook_timeout, json=payload
+    job = payload.get("job_id")
+    # Serialise ourselves so the signature binds the EXACT bytes we POST. When a
+    # signing key is configured, a short-lived EdDSA token authenticates the
+    # callback and its `bh` claim pins this body; receivers verify it against our
+    # JWKS. Unset ⇒ sent unsigned (no header).
+    body = json.dumps(payload, separators=(",", ":")).encode()
+    headers = {"Content-Type": "application/json"}
+    token = jwt_auth.sign_webhook(webhook_url, body)
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    try:
+        # Do NOT follow redirects: the signed token binds this exact webhook_url,
+        # and a callback endpoint has no business redirecting. A 3xx is a failed
+        # delivery (the receiver must accept with a 2xx), surfaced for retry.
+        resp = _session.post(
+            webhook_url,
+            timeout=settings.webhook_timeout,
+            data=body,
+            headers=headers,
+            allow_redirects=False,
+        )
+        if resp.is_redirect:
+            raise http_requests.HTTPError(
+                f"webhook returned redirect {resp.status_code} to "
+                f"{resp.headers.get('Location')!r}; not followed"
             )
-            resp.raise_for_status()
-            logger.info(
-                f"Webhook delivered for job {payload.get('job_id')} (attempt {attempt})"
-            )
-            return True
-        except SSRFValidationError as exc:
-            # A blocked/unsafe webhook host won't become safe on retry.
-            logger.error(
-                f"Webhook host rejected for job {payload.get('job_id')}: {exc}"
-            )
-            return False
-        except http_requests.RequestException as exc:
-            logger.warning(
-                f"Webhook attempt {attempt}/{settings.webhook_max_attempts} failed "
-                f"for job {payload.get('job_id')}: {exc}"
-            )
-            if attempt < settings.webhook_max_attempts:
-                time.sleep(2 * attempt)
-    logger.error(
-        f"Giving up on webhook for job {payload.get('job_id')} after "
-        f"{settings.webhook_max_attempts} attempts"
-    )
-    return False
+        resp.raise_for_status()
+    except SSRFValidationError as exc:
+        logger.error(f"Webhook host rejected for job {job}: {exc}")
+        return
+    except http_requests.RequestException as exc:
+        # Re-raise so dramatiq retries (back-off) and dead-letters if it never
+        # lands; the caller's own reaper remains the last-resort safety net.
+        logger.warning(f"Webhook delivery failed for job {job}: {exc}")
+        raise
+    logger.info(f"Webhook delivered for job {job}")
 
 
 class FileError(Exception):
@@ -86,21 +109,21 @@ class FileError(Exception):
 
 
 def _report_error(result, webhook_url, kind, message):
-    """Populate ``result`` with a pre-scan error and push the webhook once."""
+    """Populate ``result`` with a pre-scan error and enqueue its delivery."""
     result.update(status="error", error_kind=kind, error=message)
     if webhook_url:
-        _send_webhook(webhook_url, result)
+        deliver_webhook.send(webhook_url, result)
 
 
 def _deliver(result, webhook_url, report, *, transient_error=False):
-    """Push the per-scanner report to the webhook once."""
+    """Enqueue delivery of the per-scanner report to the webhook."""
     result.update(report.as_dict())  # malware + scanners breakdown
     if transient_error:
         result.update(
             status="error", error_kind="transient", error="all scanners failed"
         )
     if webhook_url:
-        _send_webhook(webhook_url, result)
+        deliver_webhook.send(webhook_url, result)
 
 
 def _check_limits(read_bytes, download_start):
@@ -150,10 +173,10 @@ def _write_decrypted(response, file_path, download_start, enc):
         parts = int(enc["parts"])
     except (KeyError, TypeError, ValueError) as exc:
         raise encryption.DecryptionError(f"invalid encryption params: {exc}") from exc
-    if not encryption.MIN_CHUNK_SIZE <= chunk_size <= encryption.MAX_CHUNK_SIZE:
+    lo, hi = settings.encryption_min_chunk_size, settings.encryption_max_chunk_size
+    if not lo <= chunk_size <= hi:
         raise encryption.DecryptionError(
-            f"chunk_size {chunk_size} out of range "
-            f"({encryption.MIN_CHUNK_SIZE}..{encryption.MAX_CHUNK_SIZE})"
+            f"chunk_size {chunk_size} out of range ({lo}..{hi})"
         )
     if parts < 0:
         raise encryption.DecryptionError(f"invalid parts {parts}")
@@ -224,7 +247,7 @@ def scan_task(
         # (the request-layer check isn't the only way a job can reach us).
         assert_scannable(url, webhook_url)
 
-        file_path = os.path.join(settings.scan_dir, str(uuid.uuid4()))
+        file_path = os.path.join(settings.download_dir, str(uuid.uuid4()))
         response = _session.get(url, timeout=settings.url_download_timeout, stream=True)
         response.raise_for_status()
 

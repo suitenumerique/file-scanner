@@ -26,16 +26,30 @@ shared with the scanner** — just network reachability and the Redis broker.
 
 ## Authentication
 
-Scan endpoints require an `X-API-Key` header. Keys are configured via `API_KEYS`
-as a comma-separated list of `name:key` pairs (`name` identifies the caller in
-logs):
+Scan endpoints authenticate with a short-lived EdDSA (Ed25519) **Bearer JWT** in
+`Authorization: Bearer <jwt>`, verified against the caller's public key looked up
+by the token's `iss` claim. This side stores only *public* keys, so a config/env
+leak here can't forge caller tokens. The token also **binds the request** (`htm`
+method + `htu` target, plus `bh` = SHA-256 of the JSON body on the async
+endpoint) so a captured token can't be replayed on a different call or with a
+swapped `webhook_url`.
+
+Configure the accepted callers with `JWT_ISSUER_KEYS` — comma-separated
+`iss:pubkey` pairs, each the base64url raw Ed25519 public key (`iss` identifies
+the caller in logs and the `api_client` metric):
 
 ```
-API_KEYS="drive:s3cr3t-key,another-service:other-key"
+JWT_ISSUER_KEYS="drive:<drive-pubkey>,transfers:<transfers-pubkey>"
 ```
 
-Requests without a valid key get `401`. If `API_KEYS` is empty, every request is
-rejected. Keys are compared in constant time.
+Onboard a caller with **`make new-issuer NAME=<iss>`** (wraps
+`deploy/scripts/new-issuer.py`): it generates the Ed25519 keypair, prints the
+caller's private key to hand over securely, and prints the `iss:pubkey` fragment
+to append to `JWT_ISSUER_KEYS`.
+
+Requests without a valid token get `401`; with no issuer keys configured, every
+request is rejected. See [security.md](security.md#authentication) for the token
+claims, request binding, and signed webhooks.
 
 ## Configuration
 
@@ -43,9 +57,20 @@ All settings are environment variables (see `config.py`). `APP_CONFIG` selects a
 profile: `config.ProductionConfig` (default), `config.TestConfig`,
 `config.CiConfig`, `config.LocalConfig`.
 
+For local development, docker compose loads these from `deploy/env/` — committed
+`*.defaults` (dev-safe values) plus gitignored `*.local` overrides that
+`make create-env-files` scaffolds (run automatically by `make bootstrap`).
+Production supplies real values via its own environment; **never commit real
+secrets** — the `*.defaults` keys are throwaway.
+
 | Variable | Default | Description |
 | --- | --- | --- |
-| `API_KEYS` | *(empty)* | Comma-separated `name:key` pairs. **Required** in production. |
+| `JWT_ISSUER_KEYS` | *(empty)* | **Required for any caller.** Incoming caller keys, `iss:pubkey,…` (base64url raw Ed25519 public keys). `iss` names the caller in logs + the `api_client` metric. Empty ⇒ every request is `401`. |
+| `JWT_AUDIENCE` | `file-scanner` | Expected `aud` on incoming tokens (this service's identity). |
+| `JWT_MAX_AGE` | `300` | Hard cap (s) on an incoming token's `exp - iat`; also the TTL of tokens we mint for webhooks. |
+| `JWT_LEEWAY` | `60` | Clock-skew leeway (s) for `exp`/`iat`/`nbf`. |
+| `JWT_SIGNING_KEY` | *(empty)* | base64url raw Ed25519 private seed for **signing outgoing webhooks**. Public half is derived + served at `/.well-known/jwks.json`. Empty ⇒ webhooks unsigned. |
+| `JWT_SIGNING_KID` / `JWT_ISSUER` | *(empty)* / `file-scanner` | `kid` advertised in the JWKS + webhook token headers (any stable label — a date/version like `2026-07` or `v1`, or a JWK thumbprint; **set one** so receivers can match keys across a rotation); `iss` we stamp on webhook tokens. |
 | `PROMETHEUS_API_KEY` | *(empty)* | If set, `/metrics` requires `Authorization: Bearer <key>`. Empty = open (isolate it at the network layer). |
 | `DEFAULT_SCANNERS` | `{"malware": ["clamav"]}` | JSON `category → [engines]` map: the categories that exist and which engines compose each. |
 | `DEFAULT_CATEGORIES` | `malware` | Comma-separated categories run when a request names neither `categories` nor `scanners`. Must be keys of `DEFAULT_SCANNERS`. |
@@ -64,11 +89,13 @@ profile: `config.ProductionConfig` (default), `config.TestConfig`,
 | `WORKER_DASHBOARD_PATH` | `/dashboard` | Path the dashboard is mounted at on the web app. |
 | `WORKER_DASHBOARD_ALLOWED_IPS` | *(empty)* | Optional client-IP allowlist (IPs/CIDRs); empty = any IP, still password-gated. |
 | `WORKER_DASHBOARD_FORWARDED_IP_HEADER` | *(empty)* | If set (e.g. `X-Forwarded-For`), the allowlist trusts this header's leftmost IP instead of the direct peer. Only behind a proxy that overwrites it. |
-| `SCAN_DIR` | `/tmp/file-scanner` | Worker-local scratch dir for the download (not shared with the scanner). |
+| `DOWNLOAD_DIR` | `/tmp/file-scanner` | Worker-local scratch dir for the async download (not shared with the scanner). |
 | `MAX_UPLOAD_SIZE` | `104857600` (100 MiB) | Max size for a direct `/api/v1.0/scan` upload. |
 | `MAX_URL_SIZE` | `2147483648` (2 GiB) | Max size for an async download. |
 | `URL_DOWNLOAD_TIMEOUT` | `30` | Per-read timeout (s) on the async download. |
 | `DOWNLOAD_MAX_SECONDS` | `300` | Total wall-clock budget (s) for an async download. |
+| `ENCRYPTION_MIN_CHUNK_SIZE` | `4096` (4 KiB) | Floor on a client-encrypted source's `chunk_size` (guards a chunk-count CPU cost). |
+| `ENCRYPTION_MAX_CHUNK_SIZE` | `52428800` (50 MiB) | Ceiling on `chunk_size` — the worker buffers one whole chunk in RAM, so this × worker concurrency bounds memory. |
 | `WEBHOOK_TIMEOUT` / `WEBHOOK_MAX_ATTEMPTS` | `10` / `3` | Per-attempt timeout (s) / attempts before giving up. |
 | `ALLOWED_URL_HOSTS` | *(empty)* | If set, **only** these hostnames may be submitted (positive allowlist). |
 | `SSRF_ALLOWED_HOSTS` | *(empty)* | Hosts trusted to resolve to a private/internal address (SSRF bypass). |
@@ -107,8 +134,7 @@ APP_CONFIG=config.LocalConfig \
 APP_CONFIG=config.LocalConfig PYTHONPATH=src uv run python -m worker        # worker
 ```
 
-Run the tests from the repository root (they resolve fixtures under
-`client-examples/` relative to it):
+Run the tests from the repository root:
 
 ```bash
 APP_CONFIG=config.CiConfig uv run pytest
@@ -140,7 +166,7 @@ in the scrape config) — matching the convention in suitenumerique/messages. Le
 unset, `/metrics` is **open**, which is only safe when the endpoint is isolated
 at the network layer (a dedicated metrics port the public ingress doesn't route,
 `kube-rbac-proxy`, or mTLS). This matters here because the `api_client` label is
-the `API_KEYS` name of the calling service — caller identities and their scan
+the JWT `iss` of the calling service — caller identities and their scan
 volumes — so **set `PROMETHEUS_API_KEY` on any deployment where `/metrics` is
 reachable from an untrusted network**. Sync scans are counted in the web process;
 the worker process counts async scans, so scrape it too (or use

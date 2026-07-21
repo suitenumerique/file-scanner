@@ -1,9 +1,11 @@
 # API reference
 
-Scan endpoints require an `X-API-Key` header (see
-[deployment.md](deployment.md#authentication)). `/check` is unauthenticated;
-`/metrics` is open unless `PROMETHEUS_API_KEY` is set (then it needs
-`Authorization: Bearer <key>`).
+Scan endpoints require an EdDSA **Bearer JWT** (`Authorization: Bearer <jwt>`);
+see [deployment.md](deployment.md#authentication) and
+[security.md](security.md#authentication). The token binds the request (method +
+target, plus the JSON body on the async endpoint), so mint one per request.
+`/check` and `/.well-known/jwks.json` are unauthenticated; `/metrics` is open
+unless `PROMETHEUS_API_KEY` is set (then it needs `Authorization: Bearer <key>`).
 
 ## `POST /api/v1.0/scan` — synchronous
 
@@ -21,7 +23,9 @@ Naming neither uses `DEFAULT_CATEGORIES`. Naming a scanner without its category
 narrows an axis; naming it alongside the category adds to it.
 
 ```bash
-curl -sf -H "X-API-Key: $API_KEY" -F "file=@file.pdf" \
+# $TOKEN is a request-bound JWT (see the README quick start for how to mint one);
+# htu must include the query string, e.g. "/api/v1.0/scan?categories=malware,nsfw".
+curl -sf -H "Authorization: Bearer $TOKEN" -F "file=@file.pdf" \
      "http://localhost:8090/api/v1.0/scan?categories=malware,nsfw"
 ```
 
@@ -59,8 +63,6 @@ run).
 
 ## `POST /api/v1.0/scan-async` — asynchronous
 
-`POST /v2/scan-async` is a deprecated alias (used by suitenumerique/transfers).
-
 JSON body describing a file to fetch and scan; the report is delivered to
 `webhook_url` (required).
 
@@ -93,6 +95,15 @@ ciphertext is a **permanent** failure, reported via the webhook as
 
 ### Webhook payloads
 
+When `JWT_SIGNING_KEY` is configured, the POST carries an `Authorization: Bearer
+<jwt>` signed by this service; its `bh` claim binds the exact body bytes. Verify
+it against `/.well-known/jwks.json` to authenticate the callback (see
+[security.md](security.md#signed-webhooks)). Delivery is a dedicated retriable
+task — it retries with back-off and dead-letters if the receiver never accepts
+it, so make your receiver **idempotent on `job_id`**. **Respond with a `2xx`
+directly**: redirects are **not** followed (the token binds the original URL), so
+a `3xx` is treated as a failed delivery and retried.
+
 On success the worker POSTs the report plus the job context:
 
 ```jsonc
@@ -112,13 +123,19 @@ transient`.
 
 `200 Service OK` when the default scanners answer, otherwise `503`.
 
+## `GET /.well-known/jwks.json` — webhook-signing public key
+
+Unauthenticated JWK Set of this service's webhook-signing public key(s), derived
+from `JWT_SIGNING_KEY` at boot. Receivers fetch it to verify signed webhook
+callbacks. `{"keys": []}` when no signing key is configured.
+
 ## `GET /metrics` — Prometheus
 
 Prometheus exposition (bearer-gated when `PROMETHEUS_API_KEY` is set): default
 process metrics, scan counters
 (`filescanner_scans_total{scanner,category,verdict,api_client}`,
 `filescanner_scan_duration_seconds{scanner,api_client}`; `api_client` is the
-caller's `API_KEYS` name), and signature-freshness gauges
+caller's JWT `iss`), and signature-freshness gauges
 (`filescanner_signature_outdated{scanner}`,
 `filescanner_signature_version{scanner}`). See
 [deployment.md](deployment.md#monitoring) for how to secure it.

@@ -1,13 +1,18 @@
 """Shared fixtures for the test suite."""
 
+import time
 from unittest import mock
 
+import httpx
 import pytest
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from fastapi.testclient import TestClient
 
+import jwt_auth
 from app import app
-from config import TEST_API_KEY
 from scanner import get_scanner
+
+TEST_ISSUER = "dev-issuer"
 
 
 def _reachable(name: str) -> bool:
@@ -34,9 +39,56 @@ def pytest_collection_modifyitems(config, items):
                 item.add_marker(skip)
 
 
+class _MintAuth(httpx.Auth):
+    """httpx auth that mints a fresh, correctly **request-bound** EdDSA JWT for
+    each outgoing request (method + target, plus the body hash) — so tests just
+    call ``auth_client`` like ``client`` and get a valid token every time,
+    without threading per-request binding through every call site."""
+
+    # Buffer the body before signing so request.content is readable even for
+    # multipart uploads (its hash is harmless on sync, which doesn't bind it).
+    requires_request_body = True
+
+    def __init__(self, private_key, iss=TEST_ISSUER, aud="file-scanner"):
+        self._priv, self._iss, self._aud = private_key, iss, aud
+
+    def auth_flow(self, request):
+        now = int(time.time())
+        query = request.url.query.decode()
+        htu = request.url.path + (f"?{query}" if query else "")
+        payload = {
+            "iss": self._iss,
+            "aud": self._aud,
+            "iat": now,
+            "exp": now + 300,
+            "htm": request.method,
+            "htu": htu,
+        }
+        if request.content:
+            payload["bh"] = jwt_auth.body_hash(request.content)
+        request.headers["Authorization"] = (
+            f"Bearer {jwt_auth.encode(payload, private_key=self._priv)}"
+        )
+        yield request
+
+
 @pytest.fixture
 def client():
+    """An unauthenticated TestClient (for health, metrics, and 401 checks)."""
     return TestClient(app)
+
+
+@pytest.fixture
+def auth_client():
+    """A TestClient authenticated as the test caller ``dev-issuer``: it installs that
+    caller's public key and auto-signs every request with a bound Bearer JWT."""
+    priv = Ed25519PrivateKey.generate()
+    with mock.patch.dict(
+        jwt_auth._ISSUER_KEYS, {TEST_ISSUER: priv.public_key()}, clear=True
+    ):
+        c = TestClient(app)
+        c.auth = _MintAuth(priv)
+        yield c
 
 
 @pytest.fixture
@@ -58,11 +110,6 @@ def eicar():
 def eicar_outputs():
     """Signature names clamd/exav report EICAR under."""
     return ("Eicar-Test-Signature", "Win.Test.EICAR_HDB-1")
-
-
-@pytest.fixture
-def auth():
-    return {"X-API-Key": TEST_API_KEY}
 
 
 @pytest.fixture

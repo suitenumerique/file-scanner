@@ -19,6 +19,10 @@ dependencies = [
     "redis==8.0.1",
     "dramatiq-redis-streams",  # pinned by rev via [tool.uv.sources]
     "prometheus-client==0.25.0",
+    # JWT auth both ways (EdDSA/Ed25519), verified with cryptography above.
+    "pyjwt==2.13.0",
+    # 12-factor config: one source of truth for defaults, env-driven overrides.
+    "pydantic-settings==2.14.2",
 ]
 
 # Dev/test tooling (PEP 735 group, synced by default; `uv sync --no-dev` skips it).
@@ -88,6 +92,8 @@ ignore = [
 # Intentional for a containerised network service: bind 0.0.0.0 and use a
 # well-known scratch dir for downloads.
 "**/config.py" = ["S104", "S108"]
+# CLI dev helpers whose whole job is to print keys / tokens.
+"deploy/scripts/*.py" = ["T201"]
 
 [tool.ruff.lint.isort]
 known-first-party = [

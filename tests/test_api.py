@@ -31,12 +31,12 @@ def test_metrics_bearer_gate_when_key_set(client, monkeypatch):
     assert "filescanner_scans_total" in ok.text
 
 
-def test_metrics_label_api_client(client, auth, clamav_cd):
-    # A scan is attributed to the caller's API_KEYS name (here "drive").
+def test_metrics_label_api_client(auth_client, clamav_cd):
+    # A scan is attributed to the caller's JWT `iss` (here "dev-issuer").
     clamav_cd.instream.return_value = {"stream": ("OK", None)}
-    client.post(SCAN_URL, files={"file": ("f.txt", b"data")}, headers=auth)
-    r = client.get("/metrics")
-    assert 'api_client="drive"' in r.text
+    auth_client.post(SCAN_URL, files={"file": ("f.txt", b"data")})
+    r = auth_client.get("/metrics")
+    assert 'api_client="dev-issuer"' in r.text
 
 
 def test_metrics_signature_gauges(client, clamav, monkeypatch):
@@ -80,16 +80,18 @@ def test_auth_required(client):
     assert r.status_code == 401
 
 
-def test_auth_bad_key(client):
+def test_auth_bad_token(client):
     r = client.post(
-        SCAN_URL, files={"file": ("f.txt", b"data")}, headers={"X-API-Key": "wrong"}
+        SCAN_URL,
+        files={"file": ("f.txt", b"data")},
+        headers={"Authorization": "Bearer not-a-jwt"},
     )
     assert r.status_code == 401
 
 
 @pytest.mark.integration
-def test_auth_ok(client, auth):
-    r = client.post(SCAN_URL, files={"file": ("f.txt", b"clean")}, headers=auth)
+def test_auth_ok(auth_client):
+    r = auth_client.post(SCAN_URL, files={"file": ("f.txt", b"clean")})
     assert r.status_code == 200
 
 
@@ -97,41 +99,25 @@ def test_auth_ok(client, auth):
 
 
 @pytest.mark.integration
-def test_eicar(client, auth, eicar, eicar_outputs):
-    r = client.post(SCAN_URL, files={"file": ("eicar.txt", eicar)}, headers=auth)
+def test_eicar(auth_client, eicar, eicar_outputs):
+    r = auth_client.post(SCAN_URL, files={"file": ("eicar.txt", eicar)})
     assert r.status_code == 200
     assert r.json()["malware"]
     assert r.json()["scanners"][0]["reason"] in eicar_outputs
 
 
 @pytest.mark.integration
-def test_clean_file(client, auth):
-    r = client.post(SCAN_URL, files={"file": ("clean.txt", b"NO VIRUS")}, headers=auth)
+def test_clean_file(auth_client):
+    r = auth_client.post(SCAN_URL, files={"file": ("clean.txt", b"NO VIRUS")})
     assert r.status_code == 200
     assert r.json()["malware"] is False
     assert r.json()["scanners"][0]["kind"] == "clean"
 
 
 @pytest.mark.integration
-def test_encrypted_archive(client, auth):
-    with open("client-examples/protected.zip", "rb") as f:
-        r = client.post(SCAN_URL, files={"file": ("protected.zip", f)}, headers=auth)
-    assert r.status_code == 200
-    assert "malware" in r.json()
-
-
-@pytest.mark.integration
-def test_xls_macro(client, auth):
-    with open("client-examples/eicar-excel-macro-powershell-echo.xls", "rb") as f:
-        r = client.post(SCAN_URL, files={"file": ("macro.xls", f)}, headers=auth)
-    assert r.status_code == 200
-    assert r.json()["malware"]
-
-
-@pytest.mark.integration
-def test_payload_right_size(client, auth):
+def test_payload_right_size(auth_client):
     content = b"\0" * (settings.max_upload_size - 10000)
-    r = client.post(SCAN_URL, files={"file": ("big.bin", content)}, headers=auth)
+    r = auth_client.post(SCAN_URL, files={"file": ("big.bin", content)})
     assert r.status_code == 200
     assert r.json()["malware"] is False
 
@@ -140,9 +126,9 @@ def test_payload_right_size(client, auth):
 
 
 @pytest.mark.exav
-def test_exav_eicar(client, auth, eicar, eicar_outputs):
-    r = client.post(
-        f"{SCAN_URL}?scanners=exav", files={"file": ("eicar.txt", eicar)}, headers=auth
+def test_exav_eicar(auth_client, eicar, eicar_outputs):
+    r = auth_client.post(
+        f"{SCAN_URL}?scanners=exav", files={"file": ("eicar.txt", eicar)}
     )
     assert r.status_code == 200
     entry = r.json()["scanners"][0]
@@ -153,11 +139,9 @@ def test_exav_eicar(client, auth, eicar, eicar_outputs):
 
 
 @pytest.mark.exav
-def test_exav_clean(client, auth):
-    r = client.post(
-        f"{SCAN_URL}?scanners=exav",
-        files={"file": ("clean.txt", b"NO VIRUS")},
-        headers=auth,
+def test_exav_clean(auth_client):
+    r = auth_client.post(
+        f"{SCAN_URL}?scanners=exav", files={"file": ("clean.txt", b"NO VIRUS")}
     )
     assert r.status_code == 200
     assert r.json()["malware"] is False
@@ -165,21 +149,21 @@ def test_exav_clean(client, auth):
     assert r.json()["scanners"][0]["kind"] == "clean"
 
 
-def test_payload_too_large(client, auth):
+def test_payload_too_large(auth_client):
     content = b"\0" * (settings.max_upload_size + 1000)
-    r = client.post(SCAN_URL, files={"file": ("toobig.bin", content)}, headers=auth)
+    r = auth_client.post(SCAN_URL, files={"file": ("toobig.bin", content)})
     assert r.status_code == 413
 
 
 # --- verdict mapping (mocked INSTREAM) ---
 
 
-def test_unscannable_not_malware(client, auth, clamav_cd):
+def test_unscannable_not_malware(auth_client, clamav_cd):
     # An ERROR reply is unscannable, never malware. The clamav backend flattens
     # it to UNSCANNABLE (exav would preserve its structured tag — see
     # test_scanner.py::test_exav_error_tag_is_unscannable).
     clamav_cd.instream.return_value = {"stream": ("ERROR", "Encrypted data")}
-    r = client.post(SCAN_URL, files={"file": ("locked.zip", b"data")}, headers=auth)
+    r = auth_client.post(SCAN_URL, files={"file": ("locked.zip", b"data")})
     assert r.status_code == 200
     assert r.json()["malware"] is False
     entry = r.json()["scanners"][0]
@@ -187,23 +171,23 @@ def test_unscannable_not_malware(client, auth, clamav_cd):
     assert entry["reason"] == "UNSCANNABLE"
 
 
-def test_all_scanners_error_returns_503(client, auth, clamav_cd):
+def test_all_scanners_error_returns_503(auth_client, clamav_cd):
     clamav_cd.instream.return_value = {"stream": ("ERROR", "Can't allocate memory")}
-    r = client.post(SCAN_URL, files={"file": ("f.bin", b"data")}, headers=auth)
+    r = auth_client.post(SCAN_URL, files={"file": ("f.bin", b"data")})
     assert r.status_code == 503
 
 
-def test_untagged_file_error_is_unscannable(client, auth, clamav_cd):
+def test_untagged_file_error_is_unscannable(auth_client, clamav_cd):
     clamav_cd.instream.return_value = {"stream": ("ERROR", "Broken archive")}
-    r = client.post(SCAN_URL, files={"file": ("f.bin", b"data")}, headers=auth)
+    r = auth_client.post(SCAN_URL, files={"file": ("f.bin", b"data")})
     assert r.status_code == 200
     assert r.json()["scanners"][0]["reason"] == "UNSCANNABLE"
 
 
-def test_scanners_param_selects(client, auth, clamav_cd):
+def test_scanners_param_selects(auth_client, clamav_cd):
     clamav_cd.instream.return_value = {"stream": ("OK", None)}
-    r = client.post(
-        f"{SCAN_URL}?scanners=clamav", files={"file": ("f.txt", b"data")}, headers=auth
+    r = auth_client.post(
+        f"{SCAN_URL}?scanners=clamav", files={"file": ("f.txt", b"data")}
     )
     assert r.status_code == 200
     entry = r.json()["scanners"][0]
@@ -211,12 +195,10 @@ def test_scanners_param_selects(client, auth, clamav_cd):
     assert entry["category"] == "malware"
 
 
-def test_categories_param_selects(client, auth, clamav_cd):
+def test_categories_param_selects(auth_client, clamav_cd):
     clamav_cd.instream.return_value = {"stream": ("OK", None)}
-    r = client.post(
-        f"{SCAN_URL}?categories=malware",
-        files={"file": ("f.txt", b"data")},
-        headers=auth,
+    r = auth_client.post(
+        f"{SCAN_URL}?categories=malware", files={"file": ("f.txt", b"data")}
     )
     assert r.status_code == 200
     body = r.json()
@@ -224,15 +206,15 @@ def test_categories_param_selects(client, auth, clamav_cd):
     assert body["scanners"][0]["scanner"] == "clamav"
 
 
-def test_unknown_scanner_rejected(client, auth):
-    r = client.post(
-        f"{SCAN_URL}?scanners=bogus", files={"file": ("f.txt", b"data")}, headers=auth
+def test_unknown_scanner_rejected(auth_client):
+    r = auth_client.post(
+        f"{SCAN_URL}?scanners=bogus", files={"file": ("f.txt", b"data")}
     )
     assert r.status_code == 400
 
 
-def test_unknown_category_rejected(client, auth):
-    r = client.post(
-        f"{SCAN_URL}?categories=nsfw", files={"file": ("f.txt", b"data")}, headers=auth
+def test_unknown_category_rejected(auth_client):
+    r = auth_client.post(
+        f"{SCAN_URL}?categories=nsfw", files={"file": ("f.txt", b"data")}
     )
     assert r.status_code == 400

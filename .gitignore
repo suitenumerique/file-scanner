@@ -11,3 +11,8 @@ __pycache__/
 htmlcov/
 .pytest_cache/
 .ruff_cache/
+
+# Local env overrides — keep the committed .defaults / .e2e templates
+deploy/env/*
+!deploy/env/*.defaults
+!deploy/env/*.e2e

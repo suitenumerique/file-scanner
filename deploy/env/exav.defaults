@@ -1,0 +1,5 @@
+# Dev defaults for the optional exav scanner (docker compose, profile: exav).
+# Local overrides go in deploy/env/exav.local (gitignored).
+
+# Load clamav's shared signature DB read-only; don't self-update.
+CLAMAV_NO_FRESHCLAMD=true

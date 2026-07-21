@@ -105,31 +105,29 @@ def guard_active(monkeypatch):
     monkeypatch.setattr(settings, "testing", False)
 
 
-def test_metadata_url_rejected(client, auth, guard_active):
+def test_metadata_url_rejected(auth_client, guard_active):
     def _reject(hostname, **_):
         raise SSRFValidationError(f"{hostname} resolves to cloud metadata endpoint")
 
     with mock.patch("validation.validate_hostname", side_effect=_reject):
-        r = client.post(
+        r = auth_client.post(
             "/api/v1.0/scan-async",
             json={
                 "url": "http://metadata.example.com/latest/meta-data",
                 "webhook_url": "http://callback.example.com/av",
             },
-            headers=auth,
         )
     assert r.status_code == 400
     assert "metadata" in r.json()["detail"]
 
 
-def test_public_url_accepted(client, auth, guard_active):
+def test_public_url_accepted(auth_client, guard_active):
     with mock.patch("validation.validate_hostname", return_value=["93.184.216.34"]):
-        r = client.post(
+        r = auth_client.post(
             "/api/v1.0/scan-async",
             json={
                 "url": "http://example.com/f.pdf",
                 "webhook_url": "http://callback.example.com/av",
             },
-            headers=auth,
         )
     assert r.status_code == 202

@@ -16,11 +16,11 @@ from fastapi import (
     UploadFile,
 )
 from fastapi.responses import PlainTextResponse
-from fastapi.security import APIKeyHeader
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from pydantic import BaseModel, Field, HttpUrl, field_validator
 
 import encryption
+import jwt_auth
 from config import get_settings
 from metrics import refresh_signatures
 from scanner import get_scanner, resolve_scanners, run_scanners, validate_registry
@@ -35,30 +35,46 @@ logging.basicConfig(level=logging.DEBUG if settings.debug else logging.INFO)
 
 # --- Auth ---
 
-API_KEYS: dict[str, str] = {}
-for raw_entry in settings.api_keys.split(","):
-    entry = raw_entry.strip()
-    if ":" in entry:
-        name, key = entry.split(":", 1)
-        API_KEYS[key] = name
-
-if not API_KEYS:
+if not jwt_auth.enabled_incoming():
     logger.warning(
-        "No API keys configured — every request will return 401. "
-        "Set API_KEYS as a comma-separated list of name:key pairs."
+        "No JWT issuer keys configured — every request will return 401. "
+        "Set JWT_ISSUER_KEYS (iss:pubkey pairs of caller Ed25519 public keys)."
     )
 
-api_key_header = APIKeyHeader(name="X-API-Key")
+
+async def _authenticate(request: Request, *, bind_body: bool) -> str:
+    """Authenticate a request via its EdDSA **Bearer JWT** and return the caller
+    identity (its ``iss``, used as the metrics ``api_client`` label). The token is
+    verified against the caller's configured public key and **bound to this
+    request** — its method + target, plus the body hash when ``bind_body`` (the
+    async endpoint, so the ``url``/``webhook_url`` can't be swapped). The sync
+    upload's file bytes are never hashed (``bind_body`` is False there)."""
+    authz = request.headers.get("Authorization") or ""
+    if not authz.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing bearer token")
+    try:
+        payload = jwt_auth.decode(authz[7:].strip())
+        method, htu = jwt_auth.request_target(
+            request.method, request.url.path, request.url.query
+        )
+        body = await request.body() if bind_body else None
+        jwt_auth.check_binding(
+            payload, method=method, htu=htu, body=body, require_body=bind_body
+        )
+    except jwt_auth.JWTError as exc:
+        raise HTTPException(401, detail=f"Invalid token: {exc}") from exc
+    return payload["iss"]
 
 
-def verify_auth(key: Annotated[str, Depends(api_key_header)]) -> str:
-    # Constant-time comparison against every configured key so a timing side
-    # channel can't be used to recover a valid key byte by byte.
-    if key:
-        for candidate, service in API_KEYS.items():
-            if hmac.compare_digest(key, candidate):
-                return service
-    raise HTTPException(status_code=401, detail="Invalid API key")
+async def auth_sync(request: Request) -> str:
+    """Auth for the sync upload endpoint — binds method + target, not file bytes."""
+    return await _authenticate(request, bind_body=False)
+
+
+async def auth_async(request: Request) -> str:
+    """Auth for the async endpoint — also binds the JSON body (so the token
+    covers the ``url`` and ``webhook_url`` the caller authorised)."""
+    return await _authenticate(request, bind_body=True)
 
 
 # --- Helpers / models ---
@@ -93,10 +109,12 @@ class ScanEncryption(BaseModel):
     # URL-safe base64 AES-256 key (43 chars unpadded, 44 padded).
     key: str = Field(min_length=43, max_length=44, pattern=r"^[A-Za-z0-9_-]+={0,2}$")
     # Plaintext bytes per crypto chunk; each stored chunk is this + 28 bytes
-    # (12-byte IV + 16-byte GCM tag), the last one shorter. Bounded both ways: a
-    # ceiling so the worker can't be forced to buffer a huge chunk (memory), a
-    # floor so a tiny chunk_size can't inflate the chunk count (CPU).
-    chunk_size: int = Field(ge=encryption.MIN_CHUNK_SIZE, le=encryption.MAX_CHUNK_SIZE)
+    # (12-byte IV + 16-byte GCM tag), the last one shorter. Bounded both ways
+    # (ceiling: worker memory; floor: chunk-count CPU) by the configurable
+    # ENCRYPTION_MIN/MAX_CHUNK_SIZE.
+    chunk_size: int = Field(
+        ge=settings.encryption_min_chunk_size, le=settings.encryption_max_chunk_size
+    )
     # AAD prefix: each chunk is bound to f"{file_id}:{part}:{parts}".
     file_id: str = Field(min_length=1, max_length=255)
     # Total number of chunks; bound into every chunk's AAD to defeat trailing
@@ -205,6 +223,14 @@ def metrics(_: None = Depends(verify_prometheus)):
     return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
+@app.get("/.well-known/jwks.json")
+def jwks():
+    """Our webhook-signing public key(s) as a JWK Set, derived from
+    JWT_SIGNING_KEY at boot. Public by design; empty when no signing key is set.
+    Receivers fetch this to verify signed webhook callbacks."""
+    return jwt_auth.jwks()
+
+
 @app.get("/", response_class=PlainTextResponse)
 @app.get("/check", response_class=PlainTextResponse)
 def healthcheck():
@@ -223,7 +249,7 @@ def healthcheck():
 @app.post("/api/v1.0/scan")
 def scan(
     file: UploadFile = File(...),
-    username: str = Depends(verify_auth),
+    username: str = Depends(auth_sync),
     categories: Annotated[
         str | None,
         Query(
@@ -257,10 +283,9 @@ def scan(
 
 
 @app.post("/api/v1.0/scan-async", status_code=202)
-@app.post("/v2/scan-async", status_code=202, deprecated=True)  # alias used by transfers
 def scan_async(
     body: ScanAsyncRequest,
-    username: str = Depends(verify_auth),
+    username: str = Depends(auth_async),
 ):
     """Queue an asynchronous scan. Stateless: nothing is persisted — the result
     is delivered exclusively via the (mandatory) ``webhook_url`` callback, so a

@@ -17,8 +17,8 @@ from prometheus_client import Counter, Gauge, Histogram
 SCANS = Counter(
     "filescanner_scans_total",
     "File scans by scanner, category, verdict "
-    "(clean/malware/flagged/unscannable/error), and API client (the API_KEYS "
-    "name that made the request).",
+    "(clean/malware/flagged/unscannable/error), and API client (the JWT `iss` "
+    "of the caller that made the request).",
     ["scanner", "category", "verdict", "api_client"],
 )
 
@@ -47,7 +47,7 @@ _last_signature_refresh = 0.0
 
 
 def record(result, api_client: str = "") -> None:
-    """Record one ``scanner.ScannerResult`` for ``api_client`` (the API_KEYS name)."""
+    """Record one ``scanner.ScannerResult`` for ``api_client`` (caller ``iss``)."""
     SCANS.labels(result.scanner, result.category, result.kind, api_client).inc()
     SCAN_DURATION.labels(result.scanner, api_client).observe(result.time)
 

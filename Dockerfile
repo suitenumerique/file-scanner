@@ -54,7 +54,7 @@ COPY src/ /app/src/
 
 # ---- Strip the managed Python for the distroless image ----
 FROM uv AS python-stripped
-COPY --chmod=0755 deploy/strip-python.sh /usr/local/bin/strip-python
+COPY --chmod=0755 deploy/docker/strip-python.sh /usr/local/bin/strip-python
 RUN strip-python
 
 # ---- Development runtime (has a shell; used by docker compose and `make test`) ----
@@ -63,10 +63,10 @@ COPY --from=build-dev /venv /venv
 ENV PATH="/venv/bin:$PATH" \
     VIRTUAL_ENV=/venv \
     PYTHONPATH=/app/src \
-    SCAN_DIR=/tmp/file-scanner
+    DOWNLOAD_DIR=/tmp/file-scanner
 # The whole repo is bind-mounted over /app by docker compose in dev (so pyproject
-# + client-examples are present for `make test`); copy source + pyproject too so
-# the image is runnable on its own.
+# + tests are present for `make test`); copy source + pyproject too so the image
+# is runnable on its own.
 COPY src/ /app/src/
 COPY pyproject.toml /app/
 EXPOSE 8090
@@ -87,7 +87,7 @@ ENV PATH="/venv/bin:$PATH" \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONPATH=/app/src \
     PORT=8090 \
-    SCAN_DIR=/tmp/file-scanner
+    DOWNLOAD_DIR=/tmp/file-scanner
 EXPOSE 8090
 CMD ["python", "-c", "import os, uvicorn; uvicorn.run('app:app', host='0.0.0.0', port=int(os.environ.get('PORT', '8090')))"]
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \

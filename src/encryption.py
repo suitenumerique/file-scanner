@@ -30,13 +30,10 @@ IV_BYTES = 12
 GCM_TAG_BYTES = 16
 KEY_BYTES = 32  # AES-256
 OVERHEAD_PER_CHUNK = IV_BYTES + GCM_TAG_BYTES
-# Bounds on the plaintext bytes per chunk. Upper: the worker buffers one whole
-# chunk in memory before decrypting, so an unbounded chunk_size forces the
-# download into RAM (memory-DoS). Lower: a tiny chunk_size inflates the chunk
-# count and per-chunk GCM overhead into a CPU-DoS (millions of one-byte
-# decryptions), so require a sensible floor.
-MIN_CHUNK_SIZE = 4096  # 4 KiB
-MAX_CHUNK_SIZE = 16 * 1024 * 1024  # 16 MiB
+# The plaintext `chunk_size` is bounded both ways (floor: CPU, ceiling: worker
+# RAM); the limits are configurable — see ``ENCRYPTION_MIN/MAX_CHUNK_SIZE`` in
+# ``config.py`` — and enforced at the request layer (``app.py``) and again in the
+# worker (``tasks.py``).
 
 # URL-safe base64 alphabet, optional padding. The key travels in a URL fragment
 # on the caller's side, so '+' and '/' are not acceptable even though they are
