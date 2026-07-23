@@ -90,14 +90,20 @@ jobs:
           outputs: type=image,oci-mediatypes=false,push=true
       - name: Create multi-arch manifests
         id: create-manifest
+        # Pass the tag list through env: so bash receives it as data, not as
+        # code — inlining ${{ steps.meta.outputs.tags }} directly into the
+        # `run:` body lets any shell metacharacters in a tag execute at
+        # expansion time (pre-hardening, GHA-injection pattern).
+        env:
+          META_TAGS: ${{ steps.meta.outputs.tags }}
         run: |
-          readarray -t TAGS <<< "${{ steps.meta.outputs.tags }}"
+          readarray -t TAGS <<< "$META_TAGS"
           FIRST_TAG=""
           for tag in "${TAGS[@]}"; do
             [ -z "$tag" ] && continue
             docker buildx imagetools create \
-            --annotation "index:org.opencontainers.image.title=file-scanner" \
-            -t "$tag" "${tag}-amd64" "${tag}-arm64"
+              --annotation "index:org.opencontainers.image.title=file-scanner" \
+              -t "$tag" "${tag}-amd64" "${tag}-arm64"
             [ -z "$FIRST_TAG" ] && FIRST_TAG="$tag"
           done
           if [ -n "$FIRST_TAG" ]; then
