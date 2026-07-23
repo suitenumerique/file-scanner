@@ -70,20 +70,24 @@ jobs:
           context: ${{ inputs.context }}
           target: ${{ inputs.target }}
           platforms: linux/amd64
-          push: true
           provenance: false
           tags: ${{ steps.platform-tags.outputs.amd64 }}
           labels: ${{ steps.meta.outputs.labels }}
+          # Force Docker manifest v2 schema so HEALTHCHECK (a Docker
+          # extension, not in the OCI spec) survives into the published
+          # image config. Without this, buildx emits OCI mediatypes and
+          # the Healthcheck field is stripped at push time.
+          outputs: type=image,oci-mediatypes=false,push=true
       - name: Build and push (arm64)
         uses: docker/build-push-action@v6
         with:
           context: ${{ inputs.context }}
           target: ${{ inputs.target }}
           platforms: linux/arm64
-          push: true
           provenance: false
           tags: ${{ steps.platform-tags.outputs.arm64 }}
           labels: ${{ steps.meta.outputs.labels }}
+          outputs: type=image,oci-mediatypes=false,push=true
       - name: Create multi-arch manifests
         id: create-manifest
         run: |
@@ -91,7 +95,9 @@ jobs:
           FIRST_TAG=""
           for tag in "${TAGS[@]}"; do
             [ -z "$tag" ] && continue
-            docker buildx imagetools create -t "$tag" "${tag}-amd64" "${tag}-arm64"
+            docker buildx imagetools create \
+            --annotation "index:org.opencontainers.image.title=file-scanner" \
+            -t "$tag" "${tag}-amd64" "${tag}-arm64"
             [ -z "$FIRST_TAG" ] && FIRST_TAG="$tag"
           done
           if [ -n "$FIRST_TAG" ]; then
