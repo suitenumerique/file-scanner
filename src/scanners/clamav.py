@@ -102,6 +102,17 @@ class ClamavScanner(Scanner):
             result = self._client().instream(fileobj)
         except clamd.ConnectionError as exc:
             raise ScannerError(f"scanner unreachable: {exc}") from exc
+        except (BrokenPipeError, ConnectionResetError) as exc:
+            # clamd closes the socket mid-INSTREAM when the stream exceeds its
+            # StreamMaxLength (default 100M): the python client then dies on
+            # send() before it can read the "INSTREAM size limit exceeded"
+            # reply. Name the cause — it's a deployment limit, not a flaky
+            # daemon — and keep it transient so the scan passes once raised.
+            raise ScannerError(
+                "clamd closed the stream mid-scan: the file is probably above "
+                "its StreamMaxLength (raise CLAMD_CONF_StreamMaxLength / "
+                f"MaxFileSize / MaxScanSize past MAX_URL_SIZE): {exc}"
+            ) from exc
         status, reason = result["stream"]
 
         if status == "OK":

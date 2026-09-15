@@ -238,6 +238,32 @@ actively need queue administration; to inspect the queue without exposing it on
 the API tier, keep it unset here and run the dashboard as a separate,
 network-restricted process against the same broker.
 
+## clamd size limits
+
+clamd enforces its own caps, independent of `MAX_URL_SIZE`, and their
+defaults (`StreamMaxLength` 100M, `MaxFileSize` 100M, `MaxScanSize` 400M)
+are far below the 2 GiB the scanner accepts. Two failure modes if they
+are left alone:
+
+* a file above `StreamMaxLength` dies mid-INSTREAM — clamd logs
+  `INSTREAM: Size limit reached` and closes the socket, the worker reports a
+  transient scanner error, and every retry fails the same way;
+* a file above `MaxFileSize` / `MaxScanSize` is **skipped and reported
+  clean** (unless `AlertExceedsMax` is on, which turns it into a detection
+  instead — neither is what you want).
+
+Set all three above `MAX_URL_SIZE` on the clamd container. The official
+`clamav/clamav` image maps `CLAMD_CONF_<Option>` onto `clamd.conf`:
+
+```
+CLAMD_CONF_StreamMaxLength=2200M
+CLAMD_CONF_MaxFileSize=2200M
+CLAMD_CONF_MaxScanSize=2200M
+```
+
+clamd spools an INSTREAM to its `TemporaryDirectory` before scanning, so the
+container needs that much free disk as well.
+
 ## Scaling
 
 The scanner daemon is the heavy tier (each loads the full signature DB). Because

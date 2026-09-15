@@ -296,6 +296,21 @@ def test_clamd_connection_error_raises_scanner_error():
             sc.scan(b"data")
 
 
+@pytest.mark.parametrize(
+    "exc", [BrokenPipeError(32, "Broken pipe"), ConnectionResetError()]
+)
+def test_clamd_closing_the_stream_names_the_size_limit(exc):
+    """clamd drops the socket when INSTREAM passes StreamMaxLength; the client
+    dies on send(). That must surface as a transient ScannerError pointing
+    at the limit, not as an anonymous "internal error" crash."""
+    sc = ClamavScanner()
+    cd = mock.MagicMock()
+    cd.instream.side_effect = exc
+    with mock.patch.object(sc, "_client", return_value=cd):
+        with pytest.raises(ScannerError, match="StreamMaxLength"):
+            sc.scan(b"data")
+
+
 # --- host pools + backends ---
 
 

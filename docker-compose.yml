@@ -44,6 +44,14 @@ services:
     platform: linux/amd64
     ports:
       - 3310:3310
+    # clamd's own size limits must clear MAX_URL_SIZE (2 GiB by default), or
+    # a big file dies mid-INSTREAM ("Size limit reached") — and a file over
+    # MaxFileSize would be reported clean without being scanned. The image
+    # maps CLAMD_CONF_<Option> onto clamd.conf.
+    environment:
+      CLAMD_CONF_StreamMaxLength: 2200M
+      CLAMD_CONF_MaxFileSize: 2200M
+      CLAMD_CONF_MaxScanSize: 2200M
     volumes:
       - clamav_data:/var/lib/clamav
     healthcheck:
