@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Generate an Ed25519 keypair for a new JWT issuer (a caller of this service).
 
-Usage:  python deploy/new-issuer.py <issuer-name>
+Usage:  python deploy/scripts/new-issuer.py <issuer-name>
    or:  make new-issuer NAME=<issuer-name>
-   or:  python deploy/new-issuer.py --signing-key   (this service's own key)
+   or:  python deploy/scripts/new-issuer.py --signing-key   (this service's own key)
+   or:  make signing-key
 
 Prints two things:
 
@@ -17,9 +18,10 @@ Prints two things:
 Keys are the raw 32-byte Ed25519 values as unpadded URL-safe base64 — exactly
 the format src/jwt_auth.py parses.
 
-With ``--signing-key`` it instead prints one line: a fresh private seed for
-JWT_SIGNING_KEY, the key this deployment signs its webhooks with (the public
-half is derived at boot and served at /.well-known/jwks.json).
+With ``--signing-key`` it instead prints a fresh private seed for
+JWT_SIGNING_KEY — the key this deployment signs its webhooks with — as the
+env lines to set on this service, with a reminder that the public half is
+derived at boot and served at /.well-known/jwks.json.
 """
 
 import base64

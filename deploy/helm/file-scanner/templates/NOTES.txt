@@ -3,7 +3,7 @@ file-scanner {{ .Chart.AppVersion }} — release {{ .Release.Name }}
 API service:   {{ include "file-scanner.fullname" . }}:{{ .Values.service.port }}  (in-cluster)
 {{- if .Values.ingress.enabled }}
 {{- range .Values.ingress.hosts }}
-Ingress:       https://{{ .host }}
+Ingress:       {{ if $.Values.ingress.tls }}https{{ else }}http{{ end }}://{{ .host }}
 {{- end }}
 {{- end }}
 clamd:         {{ include "file-scanner.clamavHosts" . | default "NOT CONFIGURED — set clamav.enabled or config.CLAMAV_HOSTS" }}
