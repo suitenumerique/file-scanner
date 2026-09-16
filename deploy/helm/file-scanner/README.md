@@ -10,14 +10,19 @@ Released charts live on GHCR as OCI artifacts, one version per release tag
 (chart `X.Y.Z` deploys image `vX.Y.Z`):
 
 ```sh
-helm install scanner oci://ghcr.io/suitenumerique/charts/file-scanner --version 0.1.1 \
+helm install file-scanner oci://ghcr.io/suitenumerique/charts/file-scanner --version 0.1.1 \
   --set config.JWT_ISSUER_KEYS="transferts:<caller base64url Ed25519 pubkey>"
 ```
+
+Every pull request touching the chart publishes a pre-release,
+`<version>-pr<n>.<sha>`, so it can be installed for review (the version is in
+the run's summary); running the workflow by hand on a branch gives
+`<version>-dev.<sha>`.
 
 From a checkout:
 
 ```sh
-helm install scanner deploy/helm/file-scanner \
+helm install file-scanner deploy/helm/file-scanner \
   --set config.JWT_ISSUER_KEYS="transferts:<caller base64url Ed25519 pubkey>" \
   --set secrets.JWT_SIGNING_KEY="<base64url Ed25519 seed>" \
   --set config.JWT_SIGNING_KID=2026-09
