@@ -51,6 +51,11 @@ new-issuer: create-env-files
 	@$(COMPOSE_RUN) --no-deps app python deploy/scripts/new-issuer.py "$(NAME)"
 .PHONY: new-issuer
 
+signing-key: ## generate this service's JWT_SIGNING_KEY (webhook signing seed)
+signing-key: create-env-files
+	@$(COMPOSE_RUN) --no-deps app python deploy/scripts/new-issuer.py --signing-key
+.PHONY: signing-key
+
 # -- Docker/compose
 
 build: ## build the docker images

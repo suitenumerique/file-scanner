@@ -3,6 +3,7 @@
 
 Usage:  python deploy/new-issuer.py <issuer-name>
    or:  make new-issuer NAME=<issuer-name>
+   or:  python deploy/new-issuer.py --signing-key   (this service's own key)
 
 Prints two things:
 
@@ -15,6 +16,10 @@ Prints two things:
 
 Keys are the raw 32-byte Ed25519 values as unpadded URL-safe base64 — exactly
 the format src/jwt_auth.py parses.
+
+With ``--signing-key`` it instead prints one line: a fresh private seed for
+JWT_SIGNING_KEY, the key this deployment signs its webhooks with (the public
+half is derived at boot and served at /.well-known/jwks.json).
 """
 
 import base64
@@ -33,9 +38,22 @@ def _b64url(raw: bytes) -> str:
     return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
 
 
+def _new_seed() -> str:
+    key = Ed25519PrivateKey.generate()
+    return _b64url(key.private_bytes(Encoding.Raw, PrivateFormat.Raw, NoEncryption()))
+
+
 def main(argv: list[str]) -> int:
-    if len(argv) != 2 or not argv[1].strip():
-        print("usage: new-issuer.py <issuer-name>", file=sys.stderr)
+    if len(argv) == 2 and argv[1] == "--signing-key":
+        print("This service's webhook-signing key (JWT_SIGNING_KEY)\n")
+        print("  1. Set on this service (keep it secret; nothing else needs it):")
+        print(f"       JWT_SIGNING_KEY={_new_seed()}")
+        print("       JWT_SIGNING_KID=<stable label, e.g. 2026-09>\n")
+        print("  2. The public half is derived at boot and served at")
+        print("     /.well-known/jwks.json — receivers verify webhooks against it.")
+        return 0
+    if len(argv) != 2 or not argv[1].strip() or argv[1].startswith("-"):
+        print("usage: new-issuer.py <issuer-name> | --signing-key", file=sys.stderr)
         return 2
     iss = argv[1].strip()
     # `iss:pubkey` pairs are comma-separated in JWT_ISSUER_KEYS, so the name can

@@ -1,0 +1,232 @@
+# Default values for file-scanner.
+#
+# Two processes run off the same image: the API (`app`) and the dramatiq
+# worker (`worker`). Both are required for async scans. ClamAV and Redis can
+# be bundled here or pointed at external instances.
+
+image:
+  repository: ghcr.io/suitenumerique/file-scanner
+  # Defaults to the chart's appVersion.
+  tag: ""
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+# ---------------------------------------------------------------------------
+# Configuration (non-secret) — every key lands in the shared ConfigMap as an
+# environment variable for both the app and the worker. See
+# docs/deployment.md for the full list. Keys set to "" are omitted.
+# ---------------------------------------------------------------------------
+config:
+  APP_CONFIG: config.ProductionConfig
+  # Accepted callers: "iss:base64url-ed25519-pubkey,…". Public keys only —
+  # fine in a ConfigMap. Empty ⇒ every request is 401.
+  JWT_ISSUER_KEYS: ""
+  JWT_AUDIENCE: file-scanner
+  JWT_ISSUER: file-scanner
+  # Label advertised with the webhook-signing key (any stable string).
+  JWT_SIGNING_KID: ""
+  DEFAULT_SCANNERS: '{"malware": ["clamav"]}'
+  DEFAULT_CATEGORIES: malware
+  # Overrides the bundled clamav service address when set (e.g. an external
+  # daemon pool "host:3310,host2:3310").
+  CLAMAV_HOSTS: ""
+  EXAV_HOSTS: ""
+  MAX_UPLOAD_SIZE: "104857600"
+  MAX_URL_SIZE: "2147483648"
+  URL_DOWNLOAD_TIMEOUT: "30"
+  DOWNLOAD_MAX_SECONDS: "300"
+  ENCRYPTION_MAX_CHUNK_SIZE: "52428800"
+  WEBHOOK_TIMEOUT: "10"
+  WEBHOOK_MAX_ATTEMPTS: "3"
+  # 0 = stateless (webhook_url mandatory); > 0 keeps results in Redis for
+  # GET /api/v1.0/jobs/{id}.
+  WORKER_RESULT_TTL: "0"
+  ALLOWED_URL_HOSTS: ""
+  SSRF_ALLOWED_HOSTS: ""
+  WORKER_DASHBOARD_PATH: /dashboard
+  WORKER_DASHBOARD_USER: ""
+  WORKER_DASHBOARD_ALLOWED_IPS: ""
+  WORKER_DASHBOARD_FORWARDED_IP_HEADER: ""
+
+# Secrets — either inline here (rendered into a Secret) or the name of an
+# existing Secret carrying the same keys. Only non-empty inline values are
+# written.
+secrets:
+  existingSecret: ""
+  # base64url raw Ed25519 private seed signing outgoing webhooks.
+  JWT_SIGNING_KEY: ""
+  # If set, /metrics requires "Authorization: Bearer <key>".
+  PROMETHEUS_API_KEY: ""
+  # Setting a password enables the queue dashboard on the app.
+  WORKER_DASHBOARD_PASSWORD: ""
+  JCOP_API_KEY: ""
+  # Only read when redis.enabled is false.
+  WORKER_BROKER_URL: ""
+
+# Extra environment on both processes (raw k8s EnvVar entries).
+extraEnv: []
+
+# ---------------------------------------------------------------------------
+# API process
+# ---------------------------------------------------------------------------
+app:
+  replicaCount: 2
+  port: 8090
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      memory: 512Mi
+  # /tmp backs the sync /api/v1.0/scan upload spool; size it above
+  # MAX_UPLOAD_SIZE × concurrent uploads.
+  tmpSizeLimit: 1Gi
+  podAnnotations: {}
+  podLabels: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  topologySpreadConstraints: []
+  podDisruptionBudget:
+    enabled: false
+    minAvailable: 1
+
+service:
+  type: ClusterIP
+  port: 80
+  annotations: {}
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: scanner.example.org
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+# ---------------------------------------------------------------------------
+# Worker process (async scans + webhook delivery)
+# ---------------------------------------------------------------------------
+worker:
+  replicaCount: 1
+  processes: 2
+  threads: 8
+  # Space-separated queues. Run a second release/deployment with "webhooks"
+  # only to keep callbacks prompt under a scan backlog (see
+  # docs/deployment.md#queues).
+  queues: "webhooks scans"
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      memory: 2Gi
+  # Scratch dir for async downloads (DOWNLOAD_DIR). One file per running scan:
+  # size it above MAX_URL_SIZE × processes × threads worst case, or lower the
+  # concurrency.
+  downloadDir: /tmp/file-scanner
+  downloadSizeLimit: 8Gi
+  podAnnotations: {}
+  podLabels: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  topologySpreadConstraints: []
+  podDisruptionBudget:
+    enabled: false
+    minAvailable: 1
+
+# ---------------------------------------------------------------------------
+# Bundled ClamAV daemon
+# ---------------------------------------------------------------------------
+clamav:
+  enabled: true
+  image:
+    repository: clamav/clamav
+    tag: "1.4"
+    pullPolicy: IfNotPresent
+  replicaCount: 1
+  port: 3310
+  # clamd's own size caps. They must clear MAX_URL_SIZE: a bigger stream is
+  # cut mid-INSTREAM ("Size limit reached"), and a file over MaxFileSize is
+  # skipped and reported clean. Rendered as CLAMD_CONF_<Option>.
+  conf:
+    StreamMaxLength: 2200M
+    MaxFileSize: 2200M
+    MaxScanSize: 2200M
+  # Extra clamd.conf options, same mapping (e.g. MaxThreads: "12").
+  extraConf: {}
+  # Signature database (~350 MB, refreshed by the bundled freshclam).
+  persistence:
+    enabled: true
+    storageClass: ""
+    accessMode: ReadWriteOnce
+    size: 2Gi
+    existingClaim: ""
+  # clamd spools each INSTREAM to /tmp before scanning: size it above
+  # StreamMaxLength × MaxThreads worst case.
+  tmpSizeLimit: 8Gi
+  resources:
+    requests:
+      cpu: 500m
+      memory: 2Gi
+    limits:
+      memory: 4Gi
+  # First start downloads the full signature set; give it time.
+  startupProbe:
+    periodSeconds: 10
+    failureThreshold: 90
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# ---------------------------------------------------------------------------
+# Bundled Redis broker (single node, no persistence needed — the queue is
+# transient by design). Set enabled: false and secrets.WORKER_BROKER_URL to
+# use a managed Redis.
+# ---------------------------------------------------------------------------
+redis:
+  enabled: true
+  image:
+    repository: redis
+    tag: "7-alpine"
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      memory: 256Mi
+
+metrics:
+  serviceMonitor:
+    enabled: false
+    interval: 30s
+    labels: {}
+    # Name of a Secret with key "token" holding PROMETHEUS_API_KEY, when set.
+    bearerTokenSecret: ""
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]

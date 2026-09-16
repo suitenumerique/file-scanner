@@ -1,0 +1,79 @@
+name: Helm chart lint
+
+"on":
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "deploy/helm/**"
+      - ".github/workflows/helm-*.yml"
+  push:
+    branches: [main]
+    paths:
+      - "deploy/helm/**"
+      - ".github/workflows/helm-*.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint, render, validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.16.2
+
+      - name: helm lint
+        run: helm lint deploy/helm/file-scanner --strict
+
+      - name: Install kubeconform
+        env:
+          KUBECONFORM_VERSION: v0.6.7
+        run: |
+          curl -sSL "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz" \
+            | tar -xz -C /usr/local/bin kubeconform
+
+      # Render the shapes an operator is likely to deploy and validate each
+      # against the Kubernetes API schemas. CRDs (ServiceMonitor) have no
+      # upstream schema and are skipped, not failed.
+      - name: Render + validate (defaults)
+        run: |
+          helm template ci deploy/helm/file-scanner \
+            | kubeconform -strict -summary -ignore-missing-schemas
+
+      - name: Render + validate (everything on)
+        run: |
+          helm template ci deploy/helm/file-scanner \
+            --set ingress.enabled=true \
+            --set metrics.serviceMonitor.enabled=true \
+            --set app.podDisruptionBudget.enabled=true \
+            --set worker.podDisruptionBudget.enabled=true \
+            --set secrets.JWT_SIGNING_KEY=ci-only \
+            --set config.JWT_ISSUER_KEYS=ci:ci \
+            | kubeconform -strict -summary -ignore-missing-schemas
+
+      - name: Render + validate (external clamd + redis, existing secret)
+        run: |
+          helm template ci deploy/helm/file-scanner \
+            --set clamav.enabled=false \
+            --set config.CLAMAV_HOSTS=clamd.internal:3310 \
+            --set redis.enabled=false \
+            --set secrets.existingSecret=scanner \
+            --set worker.queues=scans \
+            | kubeconform -strict -summary -ignore-missing-schemas
+
+      # The bundled services must be wired into the app/worker env, and must
+      # disappear cleanly when disabled.
+      - name: Wiring assertions
+        run: |
+          set -euo pipefail
+          out=$(helm template ci deploy/helm/file-scanner)
+          grep -q 'value: "ci-file-scanner-clamav:3310"' <<<"$out"
+          grep -q 'value: "redis://ci-file-scanner-redis:6379/0"' <<<"$out"
+          ! grep -q '^kind: Secret' <<<"$out"   # nothing set → no Secret
+          out=$(helm template ci deploy/helm/file-scanner --set clamav.enabled=false --set redis.enabled=false --set config.CLAMAV_HOSTS=x:1)
+          ! grep -q 'file-scanner-clamav' <<<"$out"
+          ! grep -q 'WORKER_BROKER_URL' <<<"$out"

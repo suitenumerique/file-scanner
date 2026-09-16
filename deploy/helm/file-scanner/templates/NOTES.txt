@@ -1,0 +1,22 @@
+file-scanner {{ .Chart.AppVersion }} — release {{ .Release.Name }}
+
+API service:   {{ include "file-scanner.fullname" . }}:{{ .Values.service.port }}  (in-cluster)
+{{- if .Values.ingress.enabled }}
+{{- range .Values.ingress.hosts }}
+Ingress:       https://{{ .host }}
+{{- end }}
+{{- end }}
+clamd:         {{ include "file-scanner.clamavHosts" . | default "NOT CONFIGURED — set clamav.enabled or config.CLAMAV_HOSTS" }}
+Broker:        {{ if .Values.redis.enabled }}bundled redis{{ else }}secrets.WORKER_BROKER_URL{{ end }}
+
+{{- if not .Values.config.JWT_ISSUER_KEYS }}
+
+WARNING: config.JWT_ISSUER_KEYS is empty — every scan request will be 401.
+Add the caller's "iss:pubkey" (deploy/scripts/new-issuer.py mints a pair).
+{{- end }}
+{{- if not (or .Values.secrets.JWT_SIGNING_KEY .Values.secrets.existingSecret) }}
+
+Note: no JWT_SIGNING_KEY — outgoing webhooks are unsigned.
+{{- end }}
+
+Health:  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "file-scanner.fullname" . }} 8090:{{ .Values.service.port }} && curl localhost:8090/check
