@@ -21,8 +21,9 @@ serviceAccount:
 
 # ---------------------------------------------------------------------------
 # Configuration (non-secret) — every key lands in the shared ConfigMap as an
-# environment variable for both the app and the worker. See
-# docs/deployment.md for the full list. Keys set to "" are omitted.
+# environment variable for both the app and the worker, so any setting from
+# docs/deployment.md can be added here (e.g. JWT_LEEWAY: "10"), not only the
+# ones listed. Keys set to "" are omitted.
 # ---------------------------------------------------------------------------
 config:
   APP_CONFIG: config.ProductionConfig
@@ -50,6 +51,12 @@ config:
   # GET /api/v1.0/jobs/{id}.
   WORKER_RESULT_TTL: "0"
   ALLOWED_URL_HOSTS: ""
+  # Hostnames allowed to resolve to a private address, comma-separated. Any
+  # URL the scanner fetches or calls back (the caller's file URL, its
+  # webhook_url) is refused with SSRFValidationError when its host resolves
+  # to a private address unless the exact host is listed — which is the
+  # case for an in-cluster caller (a Service name, or a public name that
+  # split DNS resolves internally).
   SSRF_ALLOWED_HOSTS: ""
   WORKER_DASHBOARD_PATH: /dashboard
   WORKER_DASHBOARD_USER: ""
@@ -104,6 +111,9 @@ service:
   port: 80
   annotations: {}
 
+# The default rule publishes the whole app, /metrics included; it is only
+# protected once secrets.PROMETHEUS_API_KEY is set. Otherwise restrict the
+# paths to the API (/api) or scrape through the Service instead.
 ingress:
   enabled: false
   className: ""
@@ -137,6 +147,9 @@ worker:
   # concurrency.
   downloadDir: /tmp/file-scanner
   downloadSizeLimit: 8Gi
+  # /tmp itself (the root filesystem is read-only); downloads have their
+  # own volume above.
+  tmpSizeLimit: 256Mi
   podAnnotations: {}
   podLabels: {}
   nodeSelector: {}
@@ -152,10 +165,14 @@ worker:
 # ---------------------------------------------------------------------------
 clamav:
   enabled: true
+  # clamav/clamav is published for linux/amd64 only; the nodeSelector below
+  # keeps the pod off arm64 nodes in a mixed cluster.
   image:
     repository: clamav/clamav
     tag: "1.4"
     pullPolicy: IfNotPresent
+  # More than one replica needs a ReadWriteMany signature volume (or no
+  # persistence): the chart refuses to render otherwise.
   replicaCount: 1
   port: 3310
   # clamd's own size caps. They must clear MAX_URL_SIZE: a bigger stream is
@@ -165,17 +182,24 @@ clamav:
     StreamMaxLength: 2200M
     MaxFileSize: 2200M
     MaxScanSize: 2200M
+    # Where INSTREAM data is spooled: the tmp volume below.
+    TemporaryDirectory: /tmp
   # Extra clamd.conf options, same mapping (e.g. MaxThreads: "12").
   extraConf: {}
-  # Signature database (~350 MB, refreshed by the bundled freshclam).
+  # Signature database (~350 MB, refreshed by the bundled freshclam). It is
+  # a cache: a fresh volume is re-downloaded on first start. Add
+  # helm.sh/resource-policy: keep to the annotations to survive uninstall.
   persistence:
     enabled: true
     storageClass: ""
     accessMode: ReadWriteOnce
     size: 2Gi
     existingClaim: ""
-  # clamd spools each INSTREAM to /tmp before scanning: size it above
-  # StreamMaxLength × MaxThreads worst case.
+    annotations: {}
+  # clamd spools each INSTREAM to /tmp before scanning, one file per
+  # concurrent stream: the worst case is StreamMaxLength × MaxThreads (clamd
+  # defaults MaxThreads to 10, i.e. ~22 GiB at 2200M). 8Gi covers three
+  # 2 GiB streams at once; raise it or cap MaxThreads in extraConf.
   tmpSizeLimit: 8Gi
   resources:
     requests:
@@ -183,11 +207,27 @@ clamav:
       memory: 2Gi
     limits:
       memory: 4Gi
+  # The image is started through the chart's own entrypoint (no root
+  # needed, see files/clamav-entrypoint.sh) as the image's clamav user, so
+  # it fits a "restricted" Pod Security namespace.
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 100
+    runAsGroup: 101
+    fsGroup: 101
+    seccompProfile:
+      type: RuntimeDefault
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop: ["ALL"]
   # First start downloads the full signature set; give it time.
   startupProbe:
     periodSeconds: 10
     failureThreshold: 90
-  nodeSelector: {}
+  nodeSelector:
+    kubernetes.io/arch: amd64
   tolerations: []
   affinity: {}
 
@@ -208,6 +248,11 @@ redis:
       memory: 64Mi
     limits:
       memory: 256Mi
+
+# Restrict the bundled redis (no password) and clamd (no auth) to the app
+# and worker pods. Needs a CNI that enforces NetworkPolicy.
+networkPolicy:
+  enabled: false
 
 metrics:
   serviceMonitor:

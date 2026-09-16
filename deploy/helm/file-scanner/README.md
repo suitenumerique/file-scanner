@@ -7,10 +7,10 @@ are required for async scans; see [docs/deployment.md](../../../docs/deployment.
 ## Install
 
 Released charts live on GHCR as OCI artifacts, one version per release tag
-(chart `X.Y.Z` deploys image `vX.Y.Z`):
+`vX.Y.Z` (chart `X.Y.Z` deploys image `X.Y.Z`):
 
 ```sh
-helm install file-scanner oci://ghcr.io/suitenumerique/charts/file-scanner --version 0.1.1 \
+helm install file-scanner oci://ghcr.io/suitenumerique/charts/file-scanner --version X.Y.Z \
   --set config.JWT_ISSUER_KEYS="transferts:<caller base64url Ed25519 pubkey>"
 ```
 
@@ -55,9 +55,14 @@ and keep it in `secrets.existingSecret`.
   `resources.limits.memory` ≥ 2 GiB.
 * The worker buffers one `ENCRYPTION_MAX_CHUNK_SIZE` chunk per running scan;
   `processes × threads × chunk` bounds its memory.
-* The app image is distroless: probes are HTTP (`/check`, which also pings
-  clamd), there is no shell to `exec` into. Use the `:debug-nonroot` base if
-  you need one.
+* The app image is distroless: probes are HTTP (readiness on `/check`,
+  which also pings clamd; startup and liveness on the JWKS document, so a
+  clamd outage makes the pods NotReady without restarting them), there is
+  no shell to `exec` into. Use the `:debug-nonroot` base if you need one.
+* Every pod runs non-root with a read-only root filesystem, clamav included
+  (started through the chart's own entrypoint rather than the image's
+  root-only `/init`), so the chart fits a `restricted` Pod Security
+  namespace. `networkPolicy.enabled` fences the bundled redis and clamd.
 
 ## Checks
 

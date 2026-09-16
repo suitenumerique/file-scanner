@@ -110,6 +110,7 @@ lint-helm: ## lint the Helm chart, render it in the shapes we ship, check the wi
 	@$(HELM) template ci $(HELM_CHART_ARG) \
 		--set ingress.enabled=true \
 		--set metrics.serviceMonitor.enabled=true \
+		--set networkPolicy.enabled=true \
 		--set app.podDisruptionBudget.enabled=true \
 		--set worker.podDisruptionBudget.enabled=true \
 		--set secrets.JWT_SIGNING_KEY=ci-only \

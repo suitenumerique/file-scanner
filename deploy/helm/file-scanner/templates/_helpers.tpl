@@ -82,7 +82,10 @@ app.kubernetes.io/component: {{ .component }}
 {{- define "file-scanner.envFrom" -}}
 - configMapRef:
     name: {{ include "file-scanner.fullname" . }}
+{{- /* The chart's own Secret only exists when an inline value is set, so it
+     is optional; a named existingSecret must exist or the pod stays Pending
+     rather than start with no signing key. */}}
 - secretRef:
     name: {{ include "file-scanner.secretName" . }}
-    optional: true
+    optional: {{ not .Values.secrets.existingSecret }}
 {{- end -}}

@@ -66,7 +66,7 @@ spec:
             sizeLimit: {{ .Values.worker.downloadSizeLimit }}
         - name: tmp
           emptyDir:
-            sizeLimit: 256Mi
+            sizeLimit: {{ .Values.worker.tmpSizeLimit }}
       {{- with .Values.worker.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

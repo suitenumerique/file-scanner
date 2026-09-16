@@ -45,14 +45,17 @@ spec:
             {{- include "file-scanner.env" . | nindent 12 }}
           envFrom:
             {{- include "file-scanner.envFrom" . | nindent 12 }}
-          # /check pings every default scanner: the pod is only ready once
-          # clamd answers, so traffic never lands on an app that would 503.
+          # Startup and liveness only prove this process answers: they hit
+          # the JWKS document, which depends on nothing. Readiness is /check,
+          # which pings every default scanner, so traffic never lands on an
+          # app that would 503 — and a clamd outage takes the pods out of the
+          # Service without restarting them.
           startupProbe:
             httpGet:
-              path: /check
+              path: /.well-known/jwks.json
               port: http
             periodSeconds: 5
-            failureThreshold: 60
+            failureThreshold: 24
           readinessProbe:
             httpGet:
               path: /check
@@ -61,7 +64,7 @@ spec:
             timeoutSeconds: 5
           livenessProbe:
             httpGet:
-              path: /check
+              path: /.well-known/jwks.json
               port: http
             periodSeconds: 30
             timeoutSeconds: 5
