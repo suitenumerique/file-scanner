@@ -76,8 +76,8 @@ jobs:
           echo "app_version=$app_version" >> "$GITHUB_OUTPUT"
           echo "Publishing chart $version (appVersion $app_version)"
 
-      - name: helm lint
-        run: helm lint "$CHART_DIR" --strict
+      - name: Lint
+        run: make lint-helm
 
       - name: Package
         env:

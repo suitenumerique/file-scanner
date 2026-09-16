@@ -20,6 +20,13 @@ COMPOSE          = docker compose
 COMPOSE_RUN      = $(COMPOSE) run --rm
 COMPOSE_RUN_APP  = $(COMPOSE_RUN) app
 
+# -- Helm
+HELM_CHART       = deploy/helm/file-scanner
+# Same helm as the CI; falls back to a pinned container when helm isn't installed.
+HELM_VERSION     = 3.16.2
+HELM             = $(shell command -v helm 2>/dev/null || echo "docker run --rm -v $(CURDIR)/deploy/helm:/charts -w /charts alpine/helm:$(HELM_VERSION)")
+HELM_CHART_ARG   = $(if $(shell command -v helm 2>/dev/null),$(HELM_CHART),file-scanner)
+
 # ==============================================================================
 # RULES
 
@@ -96,6 +103,32 @@ lint-fix: ## auto-fix lint + format issues
 	@ruff check --fix .
 	@ruff format .
 .PHONY: lint-fix
+
+lint-helm: ## lint the Helm chart, render it in the shapes we ship, check the wiring
+	@$(HELM) lint $(HELM_CHART_ARG) --strict
+	@$(HELM) template ci $(HELM_CHART_ARG) > /dev/null
+	@$(HELM) template ci $(HELM_CHART_ARG) \
+		--set ingress.enabled=true \
+		--set metrics.serviceMonitor.enabled=true \
+		--set app.podDisruptionBudget.enabled=true \
+		--set worker.podDisruptionBudget.enabled=true \
+		--set secrets.JWT_SIGNING_KEY=ci-only \
+		--set config.JWT_ISSUER_KEYS=ci:ci > /dev/null
+	@$(HELM) template ci $(HELM_CHART_ARG) \
+		--set clamav.enabled=false \
+		--set config.CLAMAV_HOSTS=clamd.internal:3310 \
+		--set redis.enabled=false \
+		--set secrets.existingSecret=scanner \
+		--set worker.queues=scans > /dev/null
+	@out=$$($(HELM) template ci $(HELM_CHART_ARG)); \
+		echo "$$out" | grep -q 'value: "ci-file-scanner-clamav:3310"' && \
+		echo "$$out" | grep -q 'value: "redis://ci-file-scanner-redis:6379/0"' && \
+		! echo "$$out" | grep -q '^kind: Secret' || { echo "bundled-service wiring broken"; exit 1; }
+	@out=$$($(HELM) template ci $(HELM_CHART_ARG) --set clamav.enabled=false --set redis.enabled=false --set config.CLAMAV_HOSTS=x:1); \
+		! echo "$$out" | grep -q 'file-scanner-clamav' && \
+		! echo "$$out" | grep -q 'WORKER_BROKER_URL' || { echo "disabled services still rendered"; exit 1; }
+	@echo "$(GREEN)helm chart OK$(RESET)"
+.PHONY: lint-helm
 
 test: ## run the test suite (in the app container, against clamav)
 test: create-env-files

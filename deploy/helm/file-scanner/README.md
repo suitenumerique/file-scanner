@@ -58,3 +58,10 @@ and keep it in `secrets.existingSecret`.
 * The app image is distroless: probes are HTTP (`/check`, which also pings
   clamd), there is no shell to `exec` into. Use the `:debug-nonroot` base if
   you need one.
+
+## Checks
+
+`make lint-helm` runs what the CI runs: `helm lint --strict`, renders the
+three configurations we ship, and asserts that the bundled clamd and Redis
+are wired into the app/worker env (and gone when disabled). Uses your local
+`helm`, or a pinned `alpine/helm` container if you have none.
