@@ -1,0 +1,13 @@
+apiVersion: v2
+name: file-scanner
+description: Antivirus scanning API (FastAPI + dramatiq workers) with an optional bundled ClamAV daemon and Redis broker.
+type: application
+version: 0.1.0
+appVersion: "0.1.1"
+home: https://github.com/suitenumerique/file-scanner
+sources:
+  - https://github.com/suitenumerique/file-scanner
+keywords:
+  - antivirus
+  - clamav
+  - scanner

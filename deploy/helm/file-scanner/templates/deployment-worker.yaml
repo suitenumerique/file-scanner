@@ -1,0 +1,85 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "file-scanner.fullname" . }}-worker
+  labels:
+    {{- include "file-scanner.labels" . | nindent 4 }}
+    app.kubernetes.io/component: worker
+spec:
+  replicas: {{ .Values.worker.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "file-scanner.selectorLabels" (dict "root" . "component" "worker") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "file-scanner.selectorLabels" (dict "root" . "component" "worker") | nindent 8 }}
+        {{- with .Values.worker.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- with .Values.worker.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "file-scanner.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      # A scan in flight (up to DOWNLOAD_MAX_SECONDS of download plus the
+      # clamd stream) should be allowed to finish on rollout.
+      terminationGracePeriodSeconds: 600
+      containers:
+        - name: worker
+          image: {{ include "file-scanner.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["python", "-m", "worker"]
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          env:
+            {{- include "file-scanner.env" . | nindent 12 }}
+            - name: WORKER_PROCESSES
+              value: {{ .Values.worker.processes | quote }}
+            - name: WORKER_THREADS
+              value: {{ .Values.worker.threads | quote }}
+            - name: WORKER_QUEUES
+              value: {{ .Values.worker.queues | quote }}
+            - name: DOWNLOAD_DIR
+              value: {{ .Values.worker.downloadDir | quote }}
+          envFrom:
+            {{- include "file-scanner.envFrom" . | nindent 12 }}
+          resources:
+            {{- toYaml .Values.worker.resources | nindent 12 }}
+          volumeMounts:
+            - name: downloads
+              mountPath: {{ .Values.worker.downloadDir }}
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: downloads
+          emptyDir:
+            sizeLimit: {{ .Values.worker.downloadSizeLimit }}
+        - name: tmp
+          emptyDir:
+            sizeLimit: {{ .Values.worker.tmpSizeLimit }}
+      {{- with .Values.worker.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.worker.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.worker.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.worker.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

@@ -72,6 +72,21 @@ Requests without a valid token get `401`; with no issuer keys configured, every
 request is rejected. See [security.md](security.md#authentication) for the token
 claims, request binding, and signed webhooks.
 
+### The service's own key (`JWT_SIGNING_KEY`)
+
+Outgoing webhooks are signed with a key that belongs to this deployment; it is
+generated once, not obtained from anyone:
+
+```sh
+make signing-key            # or: python deploy/scripts/new-issuer.py --signing-key
+```
+
+prints the two variables to set: the seed (raw 32-byte Ed25519, unpadded
+base64url — the same format as the issuer keys) and a stable `JWT_SIGNING_KID`
+(e.g. `2026-09`) so receivers can tell keys apart across a rotation. The public half is derived at boot and
+served at `/.well-known/jwks.json`; nothing else needs the private seed. Leave
+it empty and webhooks go out unsigned.
+
 ## Configuration
 
 All settings are environment variables (see `config.py`). `APP_CONFIG` selects a
@@ -160,6 +175,13 @@ Run the tests from the repository root:
 ```bash
 APP_CONFIG=config.CiConfig uv run pytest
 ```
+
+## Kubernetes (Helm)
+
+`deploy/helm/file-scanner` deploys the API, the worker and, by default, a
+bundled clamd and Redis; see its [README](../deploy/helm/file-scanner/README.md)
+for the values. The clamd size limits above are set there
+(`clamav.conf.*`).
 
 ## Container image
 
