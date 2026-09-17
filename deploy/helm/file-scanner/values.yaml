@@ -198,9 +198,10 @@ clamav:
     annotations: {}
   # clamd spools each INSTREAM to /tmp before scanning, one file per
   # concurrent stream: the worst case is StreamMaxLength × MaxThreads (clamd
-  # defaults MaxThreads to 10, i.e. ~22 GiB at 2200M). 8Gi covers three
-  # 2 GiB streams at once; raise it or cap MaxThreads in extraConf.
-  tmpSizeLimit: 8Gi
+  # defaults MaxThreads to 10, i.e. ~22 GiB at 2200M), which this covers.
+  # A cap, not a reservation: the node's ephemeral storage must actually
+  # hold it, or lower it and cap MaxThreads in extraConf.
+  tmpSizeLimit: 24Gi
   resources:
     requests:
       cpu: 500m

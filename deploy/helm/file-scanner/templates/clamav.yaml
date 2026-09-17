@@ -1,6 +1,6 @@
 {{- if .Values.clamav.enabled }}
 {{- $name := printf "%s-clamav" (include "file-scanner.fullname" .) }}
-{{- if and (gt (int .Values.clamav.replicaCount) 1) .Values.clamav.persistence.enabled (eq .Values.clamav.persistence.accessMode "ReadWriteOnce") }}
+{{- if and (gt (int .Values.clamav.replicaCount) 1) .Values.clamav.persistence.enabled (ne .Values.clamav.persistence.accessMode "ReadWriteMany") }}
 {{- fail "clamav.replicaCount > 1 needs a ReadWriteMany signature volume (clamav.persistence.accessMode) or clamav.persistence.enabled=false" }}
 {{- end }}
 {{- if and .Values.clamav.persistence.enabled (not .Values.clamav.persistence.existingClaim) }}

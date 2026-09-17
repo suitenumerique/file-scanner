@@ -14,25 +14,31 @@ helm install file-scanner oci://ghcr.io/suitenumerique/charts/file-scanner --ver
   --set config.JWT_ISSUER_KEYS="transferts:<caller base64url Ed25519 pubkey>"
 ```
 
-Every pull request touching the chart publishes a pre-release,
-`<version>-pr<n>.<sha>`, so it can be installed for review (the version is in
-the run's summary); running the workflow by hand on a branch gives
-`<version>-dev.<sha>`.
+Every pull request from a branch of this repository that touches the chart
+publishes a pre-release, `<version>-pr<n>.<sha>`, so it can be installed for
+review (the version is in the run's summary; pull requests from forks are
+skipped). Running the workflow by hand publishes the `version` input, or
+`<version>-dev.<sha>` when it is left empty.
 
-From a checkout:
+From a checkout, with the deployment's own signing key in a Secret rather
+than on the command line:
 
 ```sh
+kubectl create secret generic file-scanner \
+  --from-literal=JWT_SIGNING_KEY="<base64url Ed25519 seed>"
 helm install file-scanner deploy/helm/file-scanner \
   --set config.JWT_ISSUER_KEYS="transferts:<caller base64url Ed25519 pubkey>" \
-  --set secrets.JWT_SIGNING_KEY="<base64url Ed25519 seed>" \
+  --set secrets.existingSecret=file-scanner \
   --set config.JWT_SIGNING_KID=2026-09
 ```
 
 `deploy/scripts/new-issuer.py` mints a caller key pair; the private half goes
 to the caller (transfers: `SCAN_JWT_PRIVATE_KEY`), the public half here.
-`JWT_SIGNING_KEY` is this deployment's own key — generate it once (see
-[docs/deployment.md](../../../docs/deployment.md#the-services-own-key-jwt_signing_key))
-and keep it in `secrets.existingSecret`.
+`JWT_SIGNING_KEY` is this deployment's own key — generate it once with
+`make signing-key` (see
+[docs/deployment.md](../../../docs/deployment.md#the-services-own-key-jwt_signing_key)).
+`secrets.*` also accepts the values inline, which renders them into a Secret
+the chart owns.
 
 ## Values that matter
 
@@ -46,7 +52,7 @@ and keep it in `secrets.existingSecret`.
 | `redis.enabled` | `true` | Bundled, non-persistent broker. `false` ⇒ set `secrets.WORKER_BROKER_URL`. |
 | `worker.queues` | `webhooks scans` | Run a second release with `scans` / `webhooks` split to keep callbacks prompt under a backlog. |
 | `worker.downloadSizeLimit` | 8Gi | emptyDir for async downloads: ≥ `MAX_URL_SIZE` × concurrent scans. |
-| `clamav.tmpSizeLimit` | 8Gi | clamd spools each stream to `/tmp` before scanning. |
+| `clamav.tmpSizeLimit` | 24Gi | clamd spools each stream to `/tmp` before scanning: `StreamMaxLength` × `MaxThreads`. |
 | `ingress`, `metrics.serviceMonitor` | disabled | Standard knobs. |
 
 ## Sizing notes
