@@ -229,3 +229,37 @@ def test_unknown_category_rejected(auth_client):
         f"{SCAN_URL}?categories=nsfw", files={"file": ("f.txt", b"data")}
     )
     assert r.status_code == 400
+
+
+def test_probe_access_logs_are_dropped_when_successful():
+    """uvicorn's access log for a 200 on /check, / or /metrics is noise;
+    anything else on those paths, and every other path, still logs."""
+    import logging
+
+    from app import _DropProbeAccessLogs
+
+    flt = _DropProbeAccessLogs()
+
+    def record(path, status, method="GET"):
+        # Exactly uvicorn's call: '%s - "%s %s HTTP/%s" %d' with 5 args.
+        return logging.LogRecord(
+            "uvicorn.access",
+            logging.INFO,
+            "",
+            0,
+            '%s - "%s %s HTTP/%s" %d',
+            ("127.0.0.1:1", method, path, "1.1", status),
+            None,
+        )
+
+    assert flt.filter(record("/check", 200)) is False
+    assert flt.filter(record("/", 200)) is False
+    assert flt.filter(record("/metrics", 200)) is False
+    assert flt.filter(record("/metrics?x=1", 200)) is False
+    assert flt.filter(record("/check", 503)) is True
+    assert flt.filter(record("/metrics", 401)) is True
+    assert flt.filter(record("/checks", 200)) is True
+    assert flt.filter(record("/api/v1.0/scan-async", 202, "POST")) is True
+    # A record that isn't uvicorn's access line passes through untouched.
+    other = logging.LogRecord("uvicorn.access", logging.INFO, "", 0, "hi", (), None)
+    assert flt.filter(other) is True

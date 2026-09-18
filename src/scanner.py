@@ -31,6 +31,11 @@ from config import get_settings
 logger = logging.getLogger("file-scanner")
 settings = get_settings()
 
+# libclamav's ceiling on one file, INT_MAX - 2: MaxFileSize / MaxScanSize
+# above it are clamped ("File size limit set to 2147483645 bytes"), and a
+# bigger file is skipped rather than scanned.
+CLAMAV_MAX_FILE_BYTES = 2**31 - 3
+
 
 class ScannerError(Exception):
     """A transient scanner/infrastructure failure — a retry may succeed.
@@ -379,6 +384,18 @@ def validate_registry() -> None:
                 f"DEFAULT_CATEGORIES names {cat!r}, absent from DEFAULT_SCANNERS "
                 f"(configured: {sorted(cat_map)})"
             )
+    # clamd cannot scan past CLAMAV_MAX_FILE_BYTES whatever its MaxFileSize
+    # says (libclamav clamps it), and skips — reports clean — what it will
+    # not scan. Accepting bigger downloads with clamav as a default engine is
+    # a silent hole.
+    if settings.max_url_size > CLAMAV_MAX_FILE_BYTES and any(
+        "clamav" in names for names in cat_map.values()
+    ):
+        raise RuntimeError(
+            f"MAX_URL_SIZE ({settings.max_url_size}) is above what clamav can "
+            f"scan ({CLAMAV_MAX_FILE_BYTES} bytes): lower it, or drop "
+            "clamav from DEFAULT_SCANNERS (exav streams any size)"
+        )
 
 
 def run_scanners(names: list[str], open_file, api_client: str = "") -> ScanReport:

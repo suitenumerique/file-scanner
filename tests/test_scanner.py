@@ -100,6 +100,30 @@ def test_validate_registry_rejects_unknown_scanner(monkeypatch):
         validate_registry()
 
 
+def test_validate_registry_rejects_url_size_clamav_cannot_scan(monkeypatch):
+    """A download cap above libclamav's per-file ceiling with clamav as a
+    default engine would let files through unscanned (clamd skips what
+    exceeds it). The ceiling itself is accepted; one byte more is not."""
+    monkeypatch.setattr(scanner_mod.settings, "max_url_size", 2147483645)
+    validate_registry()
+    monkeypatch.setattr(scanner_mod.settings, "max_url_size", 2147483646)
+    with pytest.raises(RuntimeError, match="above what clamav can scan"):
+        validate_registry()
+
+
+def test_validate_registry_allows_big_downloads_without_clamav(monkeypatch):
+    monkeypatch.setattr(scanner_mod.settings, "max_url_size", 3 * 1024**3)
+    monkeypatch.setattr(scanner_mod.settings, "exav_hosts", "exav1:3310")
+    monkeypatch.setattr(
+        scanner_mod.settings, "default_scanners", '{"malware": ["exav"]}'
+    )
+    scanner_mod._cache.pop("exav", None)
+    try:
+        validate_registry()
+    finally:
+        scanner_mod._cache.pop("exav", None)
+
+
 def test_validate_registry_rejects_category_mismatch(monkeypatch):
     # clamav declares category "malware"; listing it under "nsfw" is a misconfig.
     monkeypatch.setattr(
@@ -258,6 +282,18 @@ def test_clamd_malware():
     assert v.reason == "Eicar-Test-Signature"
 
 
+@pytest.mark.parametrize(
+    "limit", ["MaxScanTime", "MaxFileSize", "MaxScanSize", "MaxRecursion"]
+)
+def test_clamd_limit_alert_is_unscannable_not_malware(limit):
+    """AlertExceedsMax turns a stopped scan into a FOUND named after the limit;
+    the file was not fully examined, which is neither clean nor a detection."""
+    v = _clamd_scan("FOUND", f"Heuristics.Limits.Exceeded.{limit}")
+    assert v.kind == "unscannable"
+    assert v.reason == "LIMITS-EXCEEDED"
+    assert not v.malware
+
+
 def test_clamav_error_tag_not_preserved():
     # Stock clamd never emits exav's structured tags, so the base — which knows
     # nothing about them — surfaces a generic UNSCANNABLE.
@@ -288,11 +324,45 @@ def test_clamd_transient_error_raises(reason):
 
 
 def test_clamd_connection_error_raises_scanner_error():
+    """A ConnectionError is the daemon being down — or clamd closing the
+    socket after the stream went through (the client reports that as a read
+    error), so the message names both."""
     sc = ClamavScanner()
     cd = mock.MagicMock()
     cd.instream.side_effect = clamd.ConnectionError("down")
     with mock.patch.object(sc, "_client", return_value=cd):
-        with pytest.raises(ScannerError):
+        with pytest.raises(ScannerError, match=r"unreachable.*StreamMaxLength"):
+            sc.scan(b"data")
+
+
+def test_clamd_empty_reply_names_the_size_limit():
+    """clamd closing without a reply makes the client return None."""
+    sc = ClamavScanner()
+    cd = mock.MagicMock()
+    cd.instream.return_value = None
+    with mock.patch.object(sc, "_client", return_value=cd):
+        with pytest.raises(ScannerError, match="StreamMaxLength"):
+            sc.scan(b"data")
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        BrokenPipeError(32, "Broken pipe"),
+        ConnectionResetError(),
+        clamd.BufferTooLongError("INSTREAM size limit exceeded. ERROR"),
+    ],
+)
+def test_clamd_closing_the_stream_names_the_size_limit(exc):
+    """When INSTREAM passes StreamMaxLength, clamd either answers "size limit
+    exceeded" (BufferTooLongError) or drops the socket so the client dies on
+    send(). Both must surface as a transient ScannerError pointing at the
+    limit, not as an anonymous "internal error" crash."""
+    sc = ClamavScanner()
+    cd = mock.MagicMock()
+    cd.instream.side_effect = exc
+    with mock.patch.object(sc, "_client", return_value=cd):
+        with pytest.raises(ScannerError, match="StreamMaxLength"):
             sc.scan(b"data")
 
 

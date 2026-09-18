@@ -1,3 +1,12 @@
+# The largest download the service accepts, in bytes: one value for the app
+# and for clamd's own caps, which must not be below it — a stream above
+# StreamMaxLength dies mid-INSTREAM, a file above MaxFileSize / MaxScanSize
+# is skipped and reported clean. Override it with MAX_URL_SIZE in .env or
+# the shell (not app.local: this setting wins over env_file). The default is
+# the most libclamav scans in one file (INT_MAX - 2); the app refuses to
+# start above it while clamav scans.
+x-max-url-size: &max_url_size ${MAX_URL_SIZE:-2147483645}
+
 services:
   app:
     build:
@@ -17,6 +26,8 @@ services:
     env_file:
       - deploy/env/app.defaults
       - deploy/env/app.local
+    environment:
+      MAX_URL_SIZE: *max_url_size
 
   worker:
     build:
@@ -34,6 +45,7 @@ services:
       - deploy/env/app.defaults
       - deploy/env/app.local
     environment:
+      MAX_URL_SIZE: *max_url_size
       # Auto-reload the worker on code changes in dev.
       WORKER_WATCH: /app/src
 
@@ -44,6 +56,19 @@ services:
     platform: linux/amd64
     ports:
       - 3310:3310
+    # clamd's caps follow MAX_URL_SIZE (see the top of this file); a bare
+    # number is bytes to clamd.conf, which the image builds from
+    # CLAMD_CONF_<Option>. The limits are inclusive: a file of exactly
+    # MAX_URL_SIZE streams and scans. MaxScanTime (ms, default 120 s) is
+    # raised for a file that size, and AlertExceedsMax makes clamd report
+    # any limit it hits instead of answering OK on a partial scan; the
+    # backend maps that report to an unscannable verdict.
+    environment:
+      CLAMD_CONF_StreamMaxLength: *max_url_size
+      CLAMD_CONF_MaxFileSize: *max_url_size
+      CLAMD_CONF_MaxScanSize: *max_url_size
+      CLAMD_CONF_MaxScanTime: "900000"
+      CLAMD_CONF_AlertExceedsMax: "yes"
     volumes:
       - clamav_data:/var/lib/clamav
     healthcheck:
