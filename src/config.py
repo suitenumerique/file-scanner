@@ -136,7 +136,9 @@ class Settings(BaseSettings):
     max_upload_size: int = 100 * 1024 * 1024  # 100 MiB
     # Max size of a file fetched by /api/v1.0/scan-async; enforced against both
     # Content-Length and the bytes actually streamed. (MAX_URL_SIZE)
-    max_url_size: int = 2 * 1024 * 1024 * 1024  # 2 GiB
+    # The default is the most clamav scans in one file (libclamav's
+    # INT_MAX - 2); see scanner.CLAMAV_MAX_FILE_BYTES.
+    max_url_size: int = 2**31 - 3  # 2,147,483,645
     # Scratch directory the async worker downloads a file into before streaming
     # it to the scanner (INSTREAM) — it holds the download, not the scan (which
     # happens over the socket). Transient (each file is deleted right after the

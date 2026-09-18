@@ -48,6 +48,11 @@ def parse_hosts(raw: str) -> list[tuple[str, int]]:
 _TRANSIENT_HINTS = ("allocate", "time limit", "timeout", "no space")
 
 
+# clamd's "signature" for a limit it hit, when AlertExceedsMax is on:
+# Heuristics.Limits.Exceeded.<MaxScanTime|MaxFileSize|MaxScanSize|...>.
+_LIMIT_ALERT_PREFIX = "Heuristics.Limits.Exceeded"
+
+
 def _is_transient(reason) -> bool:
     return any(h in (reason or "").lower() for h in _TRANSIENT_HINTS)
 
@@ -97,11 +102,34 @@ class ClamavScanner(Scanner):
         except Exception:
             return False
 
+    # Named in every failure a stream over clamd's StreamMaxLength (default
+    # 100M) can produce, so the operator reads a deployment limit rather than
+    # a flaky daemon. All stay transient: the scan passes once it is raised.
+    _LIMIT_HINT = (
+        "a file above clamd's StreamMaxLength? (raise CLAMD_CONF_StreamMaxLength "
+        "/ MaxFileSize / MaxScanSize past MAX_URL_SIZE)"
+    )
+
     def scan(self, fileobj) -> Verdict:
         try:
             result = self._client().instream(fileobj)
         except clamd.ConnectionError as exc:
-            raise ScannerError(f"scanner unreachable: {exc}") from exc
+            # The daemon is down — or it closed the socket after the stream
+            # was sent, which the client reports as a read error.
+            raise ScannerError(
+                f"clamd connection failed: {exc} — daemon unreachable, or "
+                f"{self._LIMIT_HINT}"
+            ) from exc
+        except (BrokenPipeError, ConnectionResetError, clamd.BufferTooLongError) as exc:
+            # clamd answered "INSTREAM size limit exceeded" (BufferTooLongError)
+            # or closed the socket mid-stream and the client died on send().
+            raise ScannerError(
+                f"clamd closed the stream mid-scan: {self._LIMIT_HINT}: {exc}"
+            ) from exc
+        if not result:
+            # clamd closed the connection without a reply: the client returns
+            # nothing rather than raising.
+            raise ScannerError(f"clamd sent no reply: {self._LIMIT_HINT}")
         status, reason = result["stream"]
 
         if status == "OK":
@@ -109,6 +137,12 @@ class ClamavScanner(Scanner):
         if status == "ERROR":
             # An ERROR means the file was NOT fully scanned — never clean.
             return self._error_verdict(reason)
+        if (reason or "").startswith(_LIMIT_ALERT_PREFIX):
+            # With AlertExceedsMax on, clamd reports a scan it had to stop
+            # (MaxScanTime, MaxFileSize, MaxScanSize, MaxRecursion, ...) as a
+            # FOUND named after the limit. That is a file it could not fully
+            # examine, not a detection.
+            return unscannable("LIMITS-EXCEEDED")
         # FOUND (or any other non-OK verdict) → a detection.
         return malware(reason)
 

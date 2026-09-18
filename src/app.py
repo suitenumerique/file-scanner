@@ -34,6 +34,30 @@ settings = get_settings()
 logger = logging.getLogger("file-scanner")
 logging.basicConfig(level=logging.DEBUG if settings.debug else logging.INFO)
 
+
+class _DropProbeAccessLogs(logging.Filter):
+    """Keep the healthcheck (/check every ~30s) and Prometheus (/metrics
+    every 10s) out of the access log: a successful probe carries no
+    information and buries the lines that do. Failures still show.
+
+    uvicorn logs ``'%s - "%s %s HTTP/%s" %d'`` with args
+    ``(client, method, path, http_version, status)``; match on the args, not
+    on the rendered line (the "OK" phrase is added by its formatter).
+    """
+
+    _PROBE_PATHS = ("/check", "/", "/metrics")
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = record.args
+        if not (isinstance(args, tuple) and len(args) == 5):
+            return True
+        _client, method, path, _version, status = args
+        probe = method == "GET" and str(path).split("?", 1)[0] in self._PROBE_PATHS
+        return not (probe and status == 200)
+
+
+logging.getLogger("uvicorn.access").addFilter(_DropProbeAccessLogs())
+
 # --- Auth ---
 
 if not jwt_auth.enabled_incoming():

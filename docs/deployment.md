@@ -111,7 +111,7 @@ secrets** — the `*.defaults` keys are throwaway.
 | `WORKER_DASHBOARD_FORWARDED_IP_HEADER` | *(empty)* | If set (e.g. `X-Forwarded-For`), the allowlist trusts this header's leftmost IP instead of the direct peer. Only behind a proxy that overwrites it. |
 | `DOWNLOAD_DIR` | `/tmp/file-scanner` | Worker-local scratch dir for the async download (not shared with the scanner). |
 | `MAX_UPLOAD_SIZE` | `104857600` (100 MiB) | Max size for a direct `/api/v1.0/scan` upload. |
-| `MAX_URL_SIZE` | `2147483648` (2 GiB) | Max size for an async download. |
+| `MAX_URL_SIZE` | `2147483645` | Max size for an async download — the most clamav scans in one file (see [clamd size limits](#clamd-size-limits)). |
 | `URL_DOWNLOAD_TIMEOUT` | `30` | Per-read timeout (s) on the async download. |
 | `DOWNLOAD_MAX_SECONDS` | `300` | Total wall-clock budget (s) for an async download. |
 | `ENCRYPTION_MIN_CHUNK_SIZE` | `4096` (4 KiB) | Floor on a client-encrypted source's `chunk_size` (guards a chunk-count CPU cost). |
@@ -237,6 +237,54 @@ and no code path to exploit. Set the password only on a deployment where you
 actively need queue administration; to inspect the queue without exposing it on
 the API tier, keep it unset here and run the dashboard as a separate,
 network-restricted process against the same broker.
+
+## clamd size limits
+
+clamd enforces its own caps, independent of `MAX_URL_SIZE`, and their
+defaults (`StreamMaxLength` 100M, `MaxFileSize` 100M, `MaxScanSize` 400M)
+are far below the ~2 GiB the scanner accepts. Two failure modes if they
+are left alone:
+
+* a file above `StreamMaxLength` dies mid-INSTREAM — clamd logs
+  `INSTREAM: Size limit reached` and closes the socket, the worker reports a
+  transient scanner error, and every retry fails the same way;
+* a file above `MaxFileSize` / `MaxScanSize` is **skipped and reported
+  clean**, and a scan that outlasts `MaxScanTime` (120 s by default) is
+  **stopped and reported clean** — a partial scan answering `OK`.
+
+Set all three to at least `MAX_URL_SIZE` on the clamd container (the limits
+are inclusive; the dev compose derives them from the same value). The
+official `clamav/clamav` image maps `CLAMD_CONF_<Option>` onto `clamd.conf`,
+a bare number being bytes:
+
+```
+CLAMD_CONF_StreamMaxLength=2147483645
+CLAMD_CONF_MaxFileSize=2147483645
+CLAMD_CONF_MaxScanSize=2147483645
+CLAMD_CONF_MaxScanTime=900000      # ms; a 2 GiB file takes minutes
+CLAMD_CONF_AlertExceedsMax=yes
+```
+
+`AlertExceedsMax` closes the remaining hole: any limit clamd still hits
+(time, size, recursion, ratio) is reported as
+`Heuristics.Limits.Exceeded.<Limit> FOUND` instead of `OK`, and the clamav
+backend maps that report to an `unscannable` verdict (`LIMITS-EXCEEDED`) —
+the file is neither clean nor a detection, and stays blocked, exactly as
+exav reports the same outcome.
+
+These options cannot raise clamd past its hard limit: libclamav does not
+scan a single file larger than **2,147,483,645 bytes** (`INT_MAX - 2`; it
+logs `File size limit set to 2147483645 bytes` and clamps `MaxFileSize` /
+`MaxScanSize` to that value); a larger file is skipped and reported clean.
+The service enforces the consequence at startup: with `clamav` listed in
+`DEFAULT_SCANNERS`, `MAX_URL_SIZE` must not exceed that value — the default
+— or `validate_registry()` fails and the process does not start. To accept
+larger downloads, scan them with exav, which has no such limit
+(`DEFAULT_SCANNERS={"malware": ["exav"]}`; see
+[scanner-backends.md](scanner-backends.md#exav)).
+
+clamd spools an INSTREAM to its `TemporaryDirectory` before scanning, so the
+container needs that much free disk as well.
 
 ## Scaling
 

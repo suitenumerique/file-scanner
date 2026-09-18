@@ -13,7 +13,7 @@ dependencies = [
     "clamd==1.0.2",
     "dnspython==2.8.0",
     # Decrypt client-encrypted sources (AES-256-GCM) before scanning.
-    "cryptography==49.0.0",
+    "cryptography==50.0.1",
     # Background tasks: dramatiq over the Redis Streams broker used across La Suite.
     "dramatiq==2.2.0",
     "redis==8.0.1",
