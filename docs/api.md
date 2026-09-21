@@ -43,10 +43,15 @@ each scanner's result:
 }
 ```
 
-- **Top-level per-category value**: a discrete axis (`malware`) is a bool
-  reduced by *any* detection; a scored axis (`nsfw`) is a float reduced by *max*
-  of the scanners' scores, or `null` when no scanner in that axis produced a
-  score (didn't run / errored) — never `0.0`.
+- **Top-level per-category value**: a discrete axis (`malware`) is a bool —
+  `true` on any detection, `false` only when every deciding scanner examined
+  the whole file and found nothing, `null` when one of them did not (a
+  transient error, or a file it cannot read); a scored axis (`nsfw`) is a
+  float reduced by *max* of the scanners' scores, or `null` likewise — never
+  `0.0`. When a `null` is the file's fault (an `unscannable` result and no
+  transient error), the report also carries `error_kind: "file"` and an
+  `error` naming the scanner and its tag, so a caller blocks the file rather
+  than retrying it.
 - **Per-scanner `kind`** is one of `clean`, `malware` (`reason` = signature),
   `flagged` (scored hit; `reason` = label, `score` = confidence), `unscannable`
   (`reason` = tag, e.g. `PASSWORD-PROTECTED` — could not be fully scanned,
@@ -55,7 +60,11 @@ each scanner's result:
   within a container (`report.zip/payload.exe`) — when the backend reports it
   (exav); it's omitted otherwise.
 - The scanners run **in parallel**. Aggregation within an axis is strict: the
-  file is only clean on that axis if *every* scanner scanned it and found nothing.
+  file is only clean on that axis if every *deciding* scanner scanned it and
+  found nothing. A scanner listed in `ADVISORY_SCANNERS` (see
+  [categories.md](categories.md#advisory-scanners)) is not deciding: its
+  result is reported with `"advisory": true`, its detection counts, but its
+  failure to examine the file does not — unless it ran alone.
 
 **Errors:** `400` (unknown category/scanner or empty selection), `401`
 (bad/missing key), `413` (over `MAX_UPLOAD_SIZE`), `503` (every scanner failed to
@@ -121,6 +130,9 @@ A **pre-scan** failure (bad host, download error, too large) instead posts
 own retries) or `file` (permanent property of the file). If *every* scanner fails
 transiently, the report is delivered with `status: error`, `error_kind:
 transient`. `status` is thus `done` on a completed scan and `error` on a failure.
+A completed scan whose file could not be fully examined is `status: done` with
+the category at `null` and `error_kind: "file"` (see the sync endpoint above):
+the scan ran, the answer is "not this file".
 
 ## `GET /api/v1.0/jobs/{job_id}` — poll a job
 

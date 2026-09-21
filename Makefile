@@ -111,6 +111,8 @@ lint-helm: ## lint the Helm chart, render it in the shapes we ship, check the wi
 		--set ingress.enabled=true \
 		--set metrics.serviceMonitor.enabled=true \
 		--set networkPolicy.enabled=true \
+		--set exav.enabled=true \
+		--set exav.dbUrl=https://example.org/exav.exavdb \
 		--set app.podDisruptionBudget.enabled=true \
 		--set worker.podDisruptionBudget.enabled=true \
 		--set secrets.JWT_SIGNING_KEY=ci-only \

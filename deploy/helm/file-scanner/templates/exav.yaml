@@ -1,0 +1,125 @@
+{{- if .Values.exav.enabled }}
+{{- if not .Values.exav.dbUrl }}
+{{- fail "exav.enabled needs exav.dbUrl: the prebuilt .exavdb the daemon pulls over HTTP" }}
+{{- end }}
+{{- $name := printf "%s-exav" (include "file-scanner.fullname" .) }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "file-scanner.labels" . | nindent 4 }}
+    app.kubernetes.io/component: exav
+spec:
+  type: ClusterIP
+  ports:
+    - name: clamd
+      port: {{ .Values.exav.port }}
+      targetPort: clamd
+      protocol: TCP
+  selector:
+    {{- include "file-scanner.selectorLabels" (dict "root" . "component" "exav") | nindent 4 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "file-scanner.labels" . | nindent 4 }}
+    app.kubernetes.io/component: exav
+spec:
+  replicas: {{ .Values.exav.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "file-scanner.selectorLabels" (dict "root" . "component" "exav") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "file-scanner.selectorLabels" (dict "root" . "component" "exav") | nindent 8 }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      # Talks to nobody in the cluster: no API token in the pod.
+      automountServiceAccountToken: false
+      securityContext:
+        {{- toYaml .Values.exav.podSecurityContext | nindent 8 }}
+      # A scan in progress finishes on SIGTERM; a 2 GiB stream can take
+      # minutes.
+      terminationGracePeriodSeconds: 300
+      containers:
+        - name: exav
+          image: "{{ .Values.exav.image.repository }}:{{ .Values.exav.image.tag }}"
+          imagePullPolicy: {{ .Values.exav.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.exav.securityContext | nindent 12 }}
+          ports:
+            - name: clamd
+              containerPort: 3310
+              protocol: TCP
+          env:
+            # Every exav flag is also EXAV_<FLAG>; the image's entrypoint
+            # runs the daemon with --auto-update, which polls dbUrl.
+            - name: EXAV_LISTEN
+              value: "clamd://0.0.0.0:3310"
+            - name: EXAV_DB_URL
+              value: {{ .Values.exav.dbUrl | quote }}
+            - name: EXAV_UPDATE_INTERVAL_SECS
+              value: {{ .Values.exav.updateIntervalSecs | quote }}
+            - name: EXAV_MAX_SPILL_BYTES
+              value: {{ .Values.exav.maxSpillBytes | quote }}
+            - name: EXAV_MAX_SCAN_SECS
+              value: {{ .Values.exav.maxScanSecs | quote }}
+            {{- range $key, $value := .Values.exav.extraEnv }}
+            - name: {{ $key }}
+              value: {{ $value | quote }}
+            {{- end }}
+          # The daemon answers PING only once the database is loaded; the
+          # first start downloads it.
+          startupProbe:
+            exec:
+              command: ["/exav", "--ping"]
+            periodSeconds: {{ .Values.exav.startupProbe.periodSeconds }}
+            failureThreshold: {{ .Values.exav.startupProbe.failureThreshold }}
+          readinessProbe:
+            exec:
+              command: ["/exav", "--ping"]
+            periodSeconds: 15
+            timeoutSeconds: 5
+          livenessProbe:
+            exec:
+              command: ["/exav", "--ping"]
+            periodSeconds: 60
+            timeoutSeconds: 10
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.exav.resources | nindent 12 }}
+          volumeMounts:
+            - name: db
+              mountPath: /var/lib/exav
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        # The database is a download: no claim, each pod fetches its own
+        # copy on start and keeps it while it lives.
+        - name: db
+          emptyDir:
+            sizeLimit: {{ .Values.exav.dbSizeLimit }}
+        # Streams over the in-memory threshold are spilled here while scanned.
+        - name: tmp
+          emptyDir:
+            sizeLimit: {{ .Values.exav.tmpSizeLimit }}
+      {{- with .Values.exav.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.exav.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.exav.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

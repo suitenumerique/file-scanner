@@ -1,13 +1,16 @@
-"""Scanner backend for exav (https://github.com/sylvinus/exav).
+"""Scanner backend for exav (https://exav.org).
 
 exav speaks the clamd wire protocol but adds the ``EXINSTREAM`` verb: it streams
-a file exactly like ``INSTREAM`` and replies with one line of structured JSON
-stating the verdict class outright (``clean`` / ``malware`` / ``unscannable`` /
-``error``) plus the signature and, for a detection inside a container, the inner
-member's path (``location``). So this backend parses JSON rather than guessing a
-verdict from a reason string, and surfaces a ``location`` the clamav backend
-can't. exav requires ``EXINSTREAM`` — pointing ``EXAV_HOSTS`` at a daemon without
-it (e.g. stock clamd) makes scans error.
+a file exactly like ``INSTREAM`` and replies with one line of structured JSON,
+``{"v": 1, "status": ...}`` where ``status`` is the word a clamd reply line
+ends with — ``OK`` / ``FOUND`` (with ``signature`` and, for a detection inside a
+container, the member's ``location``) / ``ERROR`` (with ``reason``) — plus
+exav's own ``PARTIAL``: the file could not be fully examined, sub-classified by
+``category`` (``LIMITS-EXCEEDED`` / ``UNSCANNABLE`` / ``PASSWORD-PROTECTED``)
+with a ``reason``. So this backend parses JSON rather than guessing a verdict
+from a reason string, and surfaces a ``location`` the clamav backend can't.
+exav requires ``EXINSTREAM`` — pointing ``EXAV_HOSTS`` at a daemon without it
+(e.g. stock clamd) makes scans error.
 
 It has its own daemon pool (``EXAV_HOSTS``, ``host:port,...``, balanced per scan)
 so clamav and exav can run in parallel against separate daemons. ``PING`` /
@@ -86,22 +89,23 @@ class ExavScanner(ClamavScanner):
             data = json.loads(raw)
         except (json.JSONDecodeError, TypeError) as exc:
             raise ScannerError(f"exav returned a non-JSON reply: {raw[:80]!r}") from exc
-        verdict = data.get("verdict")
-        if verdict == "clean":
+        status = data.get("status")
+        if status == "OK":
             return clean()
-        if verdict == "malware":
+        if status == "FOUND":
             return Verdict(
                 "malware", data.get("signature"), location=data.get("location")
             )
-        if verdict == "unscannable":
-            # exav states the class outright — no tag-vs-sentence guessing.
-            return unscannable(data.get("tag") or "UNSCANNABLE")
-        if verdict == "error":
-            # A transient/infra failure — retryable.
+        if status == "PARTIAL":
+            # Not fully examined — a property of the file, never clean. exav
+            # states the class outright — no tag-vs-sentence guessing.
+            return unscannable(data.get("category") or "UNSCANNABLE")
+        if status == "ERROR":
+            # exav itself failed — a transient/infra failure, retryable.
             raise ScannerError(
-                f"exav scan error: {data.get('message') or 'unspecified'}"
+                f"exav scan error: {data.get('reason') or 'unspecified'}"
             )
-        raise ScannerError(f"exav returned an unknown verdict: {verdict!r}")
+        raise ScannerError(f"exav returned an unknown status: {status!r}")
 
     def version(self) -> VersionInfo | None:
         return None

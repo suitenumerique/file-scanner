@@ -64,12 +64,25 @@ app.kubernetes.io/component: {{ .component }}
 {{- end -}}
 {{- end -}}
 
+{{/* exav address the app and worker talk to (empty: no exav). */}}
+{{- define "file-scanner.exavHosts" -}}
+{{- if .Values.config.EXAV_HOSTS -}}
+{{- .Values.config.EXAV_HOSTS -}}
+{{- else if .Values.exav.enabled -}}
+{{- printf "%s-exav:%d" (include "file-scanner.fullname" .) (int .Values.exav.port) -}}
+{{- end -}}
+{{- end -}}
+
 {{/* Environment shared by the app and the worker. */}}
 {{- define "file-scanner.env" -}}
 - name: PORT
   value: {{ .Values.app.port | quote }}
 - name: CLAMAV_HOSTS
   value: {{ include "file-scanner.clamavHosts" . | quote }}
+{{- with (include "file-scanner.exavHosts" .) }}
+- name: EXAV_HOSTS
+  value: {{ . | quote }}
+{{- end }}
 {{- if .Values.redis.enabled }}
 - name: WORKER_BROKER_URL
   value: {{ printf "redis://%s-redis:6379/0" (include "file-scanner.fullname" .) | quote }}

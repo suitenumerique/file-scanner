@@ -4,6 +4,7 @@ from unittest import mock
 
 import clamd
 import pytest
+from conftest import is_eicar_signature
 
 import metrics
 from app import settings
@@ -110,11 +111,11 @@ def test_auth_ok(auth_client):
 
 
 @pytest.mark.integration
-def test_eicar(auth_client, eicar, eicar_outputs):
+def test_eicar(auth_client, eicar):
     r = auth_client.post(SCAN_URL, files={"file": ("eicar.txt", eicar)})
     assert r.status_code == 200
     assert r.json()["malware"]
-    assert r.json()["scanners"][0]["reason"] in eicar_outputs
+    assert is_eicar_signature(r.json()["scanners"][0]["reason"])
 
 
 @pytest.mark.integration
@@ -137,7 +138,7 @@ def test_payload_right_size(auth_client):
 
 
 @pytest.mark.exav
-def test_exav_eicar(auth_client, eicar, eicar_outputs):
+def test_exav_eicar(auth_client, eicar):
     r = auth_client.post(
         f"{SCAN_URL}?scanners=exav", files={"file": ("eicar.txt", eicar)}
     )
@@ -146,7 +147,7 @@ def test_exav_eicar(auth_client, eicar, eicar_outputs):
     assert r.json()["malware"]
     assert entry["scanner"] == "exav"
     assert entry["category"] == "malware"
-    assert entry["reason"] in eicar_outputs
+    assert is_eicar_signature(entry["reason"])
 
 
 @pytest.mark.exav
@@ -169,15 +170,17 @@ def test_payload_too_large(auth_client):
 # --- verdict mapping (mocked INSTREAM) ---
 
 
-def test_unscannable_not_malware(auth_client, clamav_cd):
-    # An ERROR reply is unscannable, never malware. The clamav backend flattens
-    # it to UNSCANNABLE (exav would preserve its structured tag — see
-    # test_scanner.py::test_exav_error_tag_is_unscannable).
+def test_unscannable_is_neither_clean_nor_malware(auth_client, clamav_cd):
+    # An ERROR reply is unscannable: never malware, never clean either — the
+    # axis is unknown and the report blames the file. The clamav backend
+    # flattens the reason to UNSCANNABLE (exav preserves its category).
     clamav_cd.instream.return_value = {"stream": ("ERROR", "Encrypted data")}
     r = auth_client.post(SCAN_URL, files={"file": ("locked.zip", b"data")})
     assert r.status_code == 200
-    assert r.json()["malware"] is False
-    entry = r.json()["scanners"][0]
+    body = r.json()
+    assert body["malware"] is None
+    assert body["error_kind"] == "file"
+    entry = body["scanners"][0]
     assert entry["kind"] == "unscannable"
     assert entry["reason"] == "UNSCANNABLE"
 

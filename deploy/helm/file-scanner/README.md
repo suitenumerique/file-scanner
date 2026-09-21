@@ -49,6 +49,7 @@ the chart owns.
 | `clamav.enabled` | `true` | Bundled clamd. Set `false` and `config.CLAMAV_HOSTS` for an external pool. |
 | `clamav.conf.*` | 2200M | `StreamMaxLength` / `MaxFileSize` / `MaxScanSize` — must clear `MAX_URL_SIZE`, else big files are cut mid-stream or skipped and reported clean. |
 | `clamav.persistence` | 2Gi PVC | Signature database; `Recreate` strategy because RWO. |
+| `exav.enabled` / `exav.dbUrl` | `false` | Bundled [exav](https://exav.org) fed with a prebuilt `.exavdb` over HTTP; add `exav` to `config.DEFAULT_SCANNERS` to scan with both engines. |
 | `redis.enabled` | `true` | Bundled, non-persistent broker. `false` ⇒ set `secrets.WORKER_BROKER_URL`. |
 | `worker.queues` | `webhooks scans` | Run a second release with `scans` / `webhooks` split to keep callbacks prompt under a backlog. |
 | `worker.downloadSizeLimit` | 8Gi | emptyDir for async downloads: ≥ `MAX_URL_SIZE` × concurrent scans. |

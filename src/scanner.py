@@ -150,6 +150,15 @@ class ScannerResult:
     location: str | None = None
     time: float = 0.0
     scored: bool = False
+    # Runs for information: its detection counts, its failure to examine the
+    # file does not (see ADVISORY_SCANNERS).
+    advisory: bool = False
+
+    @property
+    def incomplete(self) -> bool:
+        """The scanner did not examine the whole file — transiently (``error``)
+        or as a property of the file (``unscannable``)."""
+        return self.kind in ("error", "unscannable")
 
     def as_dict(self) -> dict:
         d = {
@@ -158,6 +167,8 @@ class ScannerResult:
             "kind": self.kind,
             "time": round(self.time, 4),
         }
+        if self.advisory:
+            d["advisory"] = True
         if self.score is not None:
             d["score"] = round(self.score, 4)
         if self.reason is not None:
@@ -190,42 +201,79 @@ class ScanReport:
         """Every scanner failed transiently — nothing scanned the file at all."""
         return bool(self.results) and all(r.kind == "error" for r in self.results)
 
+    def _by_category(self) -> dict[str, list[ScannerResult]]:
+        """Results grouped by category, in first-seen order."""
+        grouped: dict[str, list[ScannerResult]] = {}
+        for result in self.results:
+            grouped.setdefault(result.category, []).append(result)
+        return grouped
+
+    @staticmethod
+    def _deciding(results: list[ScannerResult]) -> list[ScannerResult]:
+        """The non-advisory results — or all of them when only advisory
+        scanners ran: advisory means "defer to a deciding sibling", not
+        "cannot block"."""
+        return [r for r in results if not r.advisory] or results
+
+    @property
+    def unscannable(self) -> list[ScannerResult]:
+        """Deciding results whose scanner could not examine the whole file for
+        a reason that is a property of the file (never a transient error)."""
+        blaming_the_file = []
+        for results in self._by_category().values():
+            detected = any(r.kind in ("malware", "flagged") for r in results)
+            if detected:
+                continue
+            blaming_the_file += [
+                r for r in self._deciding(results) if r.kind == "unscannable"
+            ]
+        return blaming_the_file
+
     def categories(self) -> dict:
         """Per-category aggregate, in first-seen order.
 
-        Scored axes → ``max`` of the available scores (``None`` if none). A
-        discrete axis (malware) → ``True`` on any detection, ``False`` only when
-        every scanner ran and found nothing, ``None`` when a scanner errored (it
-        didn't complete, so the axis can't be asserted clean).
+        A detection wins outright, from any scanner. Otherwise the deciding
+        scanners (:meth:`_deciding`) must all have examined the whole file for
+        the axis to be asserted: a discrete axis (malware) → ``False`` then,
+        ``None`` when one of them did not complete (a transient error, or a
+        file it cannot read); a scored axis → ``max`` of the available scores,
+        ``None`` likewise.
         """
-        out: dict = {}
-        for cat in dict.fromkeys(r.category for r in self.results):
-            rs = [r for r in self.results if r.category == cat]
-            if any(r.scored for r in rs):
-                # Scored axis, mirroring the discrete precedence below: a
-                # detection (flagged) wins even if a sibling errored; otherwise an
-                # error makes the axis unknown (the available max may understate
-                # it); otherwise the max of the scores.
-                scores = [r.score for r in rs if r.score is not None]
-                if any(r.kind == "flagged" for r in rs):
-                    out[cat] = max(scores)
-                elif any(r.kind == "error" for r in rs):
-                    out[cat] = None
+        aggregates: dict = {}
+        for category, results in self._by_category().items():
+            deciding = self._deciding(results)
+            incomplete = any(r.incomplete for r in deciding)
+            if any(r.scored for r in results):
+                scores = [r.score for r in results if r.score is not None]
+                if any(r.kind == "flagged" for r in results):
+                    aggregates[category] = max(scores)
+                elif incomplete:
+                    aggregates[category] = None
                 else:
-                    out[cat] = max(scores) if scores else None
-            elif any(r.kind == "malware" for r in rs):
-                out[cat] = True  # a detection wins outright
-            elif any(r.kind == "error" for r in rs):
-                out[cat] = None  # a scanner didn't complete — can't assert clean
+                    aggregates[category] = max(scores) if scores else None
+            elif any(r.kind == "malware" for r in results):
+                aggregates[category] = True
+            elif incomplete:
+                aggregates[category] = None
             else:
-                out[cat] = False
-        return out
+                aggregates[category] = False
+        return aggregates
 
     def as_dict(self) -> dict:
-        return {
+        report = {
             **self.categories(),
             "scanners": [r.as_dict() for r in self.results],
         }
+        unscannable = self.unscannable
+        deciding_error = any(r.kind == "error" for r in self.results if not r.advisory)
+        if unscannable and not deciding_error:
+            # The file itself is why a category is unknown: say so the way a
+            # pre-scan failure does, so a caller neither trusts it nor retries.
+            report["error_kind"] = "file"
+            report["error"] = "not fully scanned: " + ", ".join(
+                f"{r.scanner} ({r.reason})" for r in unscannable
+            )
+        return report
 
 
 # --- Registry & orchestration ---
@@ -340,6 +388,12 @@ def resolve_scanners(
     return deduped
 
 
+def advisory_scanners() -> frozenset[str]:
+    """Engine names from ``ADVISORY_SCANNERS`` (see :class:`ScannerResult`)."""
+    raw = settings.advisory_scanners or ""
+    return frozenset(n.strip() for n in raw.split(",") if n.strip())
+
+
 def validate_registry() -> None:
     """Fail-fast boot check of the category configuration (called at startup).
 
@@ -384,17 +438,24 @@ def validate_registry() -> None:
                 f"DEFAULT_CATEGORIES names {cat!r}, absent from DEFAULT_SCANNERS "
                 f"(configured: {sorted(cat_map)})"
             )
+    for name in advisory_scanners():
+        if name not in _BUILDERS:
+            raise RuntimeError(
+                f"ADVISORY_SCANNERS names unknown scanner {name!r}; "
+                f"available: {sorted(_BUILDERS)}"
+            )
     # clamd cannot scan past CLAMAV_MAX_FILE_BYTES whatever its MaxFileSize
     # says (libclamav clamps it), and skips — reports clean — what it will
-    # not scan. Accepting bigger downloads with clamav as a default engine is
-    # a silent hole.
-    if settings.max_url_size > CLAMAV_MAX_FILE_BYTES and any(
+    # not scan. Accepting bigger downloads with clamav deciding a category
+    # is a silent hole; an advisory clamav defers to the engine that does.
+    clamav_decides = "clamav" not in advisory_scanners() and any(
         "clamav" in names for names in cat_map.values()
-    ):
+    )
+    if settings.max_url_size > CLAMAV_MAX_FILE_BYTES and clamav_decides:
         raise RuntimeError(
             f"MAX_URL_SIZE ({settings.max_url_size}) is above what clamav can "
-            f"scan ({CLAMAV_MAX_FILE_BYTES} bytes): lower it, or drop "
-            "clamav from DEFAULT_SCANNERS (exav streams any size)"
+            f"scan ({CLAMAV_MAX_FILE_BYTES} bytes): lower it, or drop clamav "
+            "from DEFAULT_SCANNERS or make it advisory (exav streams any size)"
         )
 
 
@@ -434,6 +495,7 @@ def run_scanners(names: list[str], open_file, api_client: str = "") -> ScanRepor
             location=location,
             time=timeit.default_timer() - start,
             scored=scanner.scored,
+            advisory=name in advisory_scanners(),
         )
         metrics.record(result, api_client)
         return result

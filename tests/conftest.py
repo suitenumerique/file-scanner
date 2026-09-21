@@ -106,10 +106,11 @@ def eicar():
     return rb"X5O!P%@AP[4\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*"
 
 
-@pytest.fixture
-def eicar_outputs():
-    """Signature names clamd/exav report EICAR under."""
-    return ("Eicar-Test-Signature", "Win.Test.EICAR_HDB-1")
+def is_eicar_signature(name: str) -> bool:
+    """Whether a reported signature is one of EICAR's. The exact name depends
+    on the database (``Eicar-Test-Signature``, ``Win.Test.EICAR_HDB-1``, a
+    vendor-prefixed name with a merged set)."""
+    return "eicar" in name.lower()
 
 
 @pytest.fixture
