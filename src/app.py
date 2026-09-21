@@ -24,7 +24,13 @@ import jwt_auth
 import results
 from config import get_settings
 from metrics import refresh_signatures
-from scanner import get_scanner, resolve_scanners, run_scanners, validate_registry
+from scanner import (
+    assert_size_cap_decidable,
+    get_scanner,
+    resolve_scanners,
+    run_scanners,
+    validate_registry,
+)
 from ssrf import SSRFValidationError
 from tasks import scan_task
 from validation import assert_scannable
@@ -338,6 +344,10 @@ def scan_async(
     must exist: ``webhook_url`` is required unless the store is enabled.
     """
     names = _resolve(body.categories, body.scanners)
+    try:
+        assert_size_cap_decidable(names)
+    except ValueError as exc:
+        raise HTTPException(400, detail=str(exc)) from exc
 
     url_str = str(body.url)
     try:

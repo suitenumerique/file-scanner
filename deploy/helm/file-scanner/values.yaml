@@ -253,8 +253,16 @@ exav:
   replicaCount: 1
   port: 3310
   # The prebuilt database (see docs/deployment.md#running-exav for how one
-  # is built and served).
+  # is built and served). https:// only: the daemon does not verify the
+  # database's signature, so the transport is what protects it.
   dbUrl: ""
+  # Allow a plain http:// dbUrl (an isolated in-cluster mirror).
+  dbUrlAllowHttp: false
+  # Instead of dbUrl: a Secret holding the URL, for one that carries
+  # credentials (basic auth) — it then never appears in the manifest.
+  dbUrlSecret:
+    name: ""
+    key: EXAV_DB_URL
   # How often the daemon re-checks dbUrl (a HEAD on the ETag).
   updateIntervalSecs: 300
   # Temp space one streamed file may take while scanned, and the wall clock
@@ -277,6 +285,9 @@ exav:
   startupProbe:
     periodSeconds: 10
     failureThreshold: 90
+  # exav 0.0.1 cuts scans in flight on SIGTERM (callers retry), so this only
+  # has to cover the process exiting.
+  terminationGracePeriodSeconds: 30
   # Distroless image running as 65532.
   podSecurityContext:
     runAsNonRoot: true

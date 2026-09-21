@@ -1,6 +1,9 @@
 {{- if .Values.exav.enabled }}
-{{- if not .Values.exav.dbUrl }}
-{{- fail "exav.enabled needs exav.dbUrl: the prebuilt .exavdb the daemon pulls over HTTP" }}
+{{- if not (or .Values.exav.dbUrl .Values.exav.dbUrlSecret.name) }}
+{{- fail "exav.enabled needs exav.dbUrl (or exav.dbUrlSecret): the prebuilt .exavdb the daemon pulls over HTTPS" }}
+{{- end }}
+{{- if and .Values.exav.dbUrl (not (hasPrefix "https://" .Values.exav.dbUrl)) (not .Values.exav.dbUrlAllowHttp) }}
+{{- fail "exav.dbUrl must be https:// — the daemon does not verify the database's signature, only the transport protects it (exav.dbUrlAllowHttp=true for an isolated mirror)" }}
 {{- end }}
 {{- $name := printf "%s-exav" (include "file-scanner.fullname" .) }}
 apiVersion: v1
@@ -45,9 +48,10 @@ spec:
       automountServiceAccountToken: false
       securityContext:
         {{- toYaml .Values.exav.podSecurityContext | nindent 8 }}
-      # A scan in progress finishes on SIGTERM; a 2 GiB stream can take
-      # minutes.
-      terminationGracePeriodSeconds: 300
+      # exav 0.0.1 does not drain on SIGTERM: scans in flight are cut and
+      # their callers retry (the worker treats a dropped connection as a
+      # transient error), so there is nothing a long grace would wait for.
+      terminationGracePeriodSeconds: {{ .Values.exav.terminationGracePeriodSeconds }}
       containers:
         - name: exav
           image: "{{ .Values.exav.image.repository }}:{{ .Values.exav.image.tag }}"
@@ -63,8 +67,17 @@ spec:
             # runs the daemon with --auto-update, which polls dbUrl.
             - name: EXAV_LISTEN
               value: "clamd://0.0.0.0:3310"
+            {{- if .Values.exav.dbUrlSecret.name }}
+            # A URL carrying credentials stays out of the rendered manifest.
+            - name: EXAV_DB_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.exav.dbUrlSecret.name }}
+                  key: {{ .Values.exav.dbUrlSecret.key }}
+            {{- else }}
             - name: EXAV_DB_URL
               value: {{ .Values.exav.dbUrl | quote }}
+            {{- end }}
             - name: EXAV_UPDATE_INTERVAL_SECS
               value: {{ .Values.exav.updateIntervalSecs | quote }}
             - name: EXAV_MAX_SPILL_BYTES

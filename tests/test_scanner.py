@@ -301,6 +301,31 @@ def test_advisory_does_not_rescue_a_deciding_scanner_that_did_not_complete():
     assert d["error_kind"] == "file"
 
 
+def test_all_errored_looks_at_deciding_scanners_only():
+    """The deciding engine down and the advisory one fine: nothing that can
+    assert a verdict scanned the file, so the job is retried as a whole."""
+    report = ScanReport(
+        [_malware("exav", "error", "down"), _malware("clamav", "clean", advisory=True)]
+    )
+    assert report.all_errored
+    report = ScanReport(
+        [_malware("exav", "clean"), _malware("clamav", "error", "down", advisory=True)]
+    )
+    assert not report.all_errored
+
+
+def test_size_cap_check_covers_a_request_deciding_with_advisory_clamav(monkeypatch):
+    """Boot lets an advisory clamav sit next to a cap above its ceiling; a
+    request naming clamav alone makes it decide, and is refused."""
+    monkeypatch.setattr(scanner_mod.settings, "max_url_size", 3 * 1024**3)
+    monkeypatch.setattr(scanner_mod.settings, "advisory_scanners", "clamav")
+    with pytest.raises(ValueError, match="clamav cannot decide"):
+        scanner_mod.assert_size_cap_decidable(["clamav"])
+    scanner_mod.assert_size_cap_decidable(["exav", "clamav"])  # exav decides
+    monkeypatch.setattr(scanner_mod.settings, "max_url_size", 1024)
+    scanner_mod.assert_size_cap_decidable(["clamav"])  # under the ceiling
+
+
 def test_advisory_scanner_running_alone_decides():
     report = ScanReport([_malware("clamav", "unscannable", "X", advisory=True)])
     assert report.categories() == {"malware": None}

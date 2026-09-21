@@ -198,8 +198,14 @@ class ScanReport:
 
     @property
     def all_errored(self) -> bool:
-        """Every scanner failed transiently — nothing scanned the file at all."""
-        return bool(self.results) and all(r.kind == "error" for r in self.results)
+        """Every deciding scanner failed transiently — nothing that could
+        assert a verdict scanned the file, whatever the advisory ones did."""
+        deciding = [
+            r
+            for results in self._by_category().values()
+            for r in self._deciding(results)
+        ]
+        return bool(deciding) and all(r.kind == "error" for r in deciding)
 
     def _by_category(self) -> dict[str, list[ScannerResult]]:
         """Results grouped by category, in first-seen order."""
@@ -394,6 +400,28 @@ def advisory_scanners() -> frozenset[str]:
     return frozenset(n.strip() for n in raw.split(",") if n.strip())
 
 
+def deciding_scanners(names: list[str]) -> list[str]:
+    """The engines that decide a scan by ``names``: the non-advisory ones, or
+    all of them when only advisory engines were named (see
+    :meth:`ScanReport._deciding`)."""
+    advisory = advisory_scanners()
+    return [n for n in names if n not in advisory] or list(names)
+
+
+def assert_size_cap_decidable(names: list[str]) -> None:
+    """Refuse a selection clamav would decide on a file it cannot scan in
+    full: past CLAMAV_MAX_FILE_BYTES clamd skips the file and reports it
+    clean. Boot checks the default selection; this covers a request naming
+    clamav alone while it is advisory. Raises ``ValueError`` (→ 400)."""
+    if settings.max_url_size > CLAMAV_MAX_FILE_BYTES and "clamav" in deciding_scanners(
+        names
+    ):
+        raise ValueError(
+            f"clamav cannot decide a scan with MAX_URL_SIZE above "
+            f"{CLAMAV_MAX_FILE_BYTES} bytes: name a deciding engine next to it"
+        )
+
+
 def validate_registry() -> None:
     """Fail-fast boot check of the category configuration (called at startup).
 
@@ -448,8 +476,8 @@ def validate_registry() -> None:
     # says (libclamav clamps it), and skips — reports clean — what it will
     # not scan. Accepting bigger downloads with clamav deciding a category
     # is a silent hole; an advisory clamav defers to the engine that does.
-    clamav_decides = "clamav" not in advisory_scanners() and any(
-        "clamav" in names for names in cat_map.values()
+    clamav_decides = any(
+        "clamav" in deciding_scanners(names) for names in cat_map.values()
     )
     if settings.max_url_size > CLAMAV_MAX_FILE_BYTES and clamav_decides:
         raise RuntimeError(

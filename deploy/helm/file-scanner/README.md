@@ -69,7 +69,8 @@ the chart owns.
 * Every pod runs non-root with a read-only root filesystem, clamav included
   (started through the chart's own entrypoint rather than the image's
   root-only `/init`), so the chart fits a `restricted` Pod Security
-  namespace. `networkPolicy.enabled` fences the bundled redis and clamd.
+  namespace. `networkPolicy.enabled` fences the bundled redis, clamd and
+  exav.
 
 ## Checks
 

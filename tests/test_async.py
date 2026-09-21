@@ -117,6 +117,23 @@ def test_creates_job_with_encryption(auth_client):
     assert r.status_code == 202
 
 
+def test_rejects_a_scan_clamav_would_decide_past_its_ceiling(auth_client, monkeypatch):
+    import scanner as scanner_mod
+
+    monkeypatch.setattr(scanner_mod.settings, "max_url_size", 3 * 1024**3)
+    monkeypatch.setattr(scanner_mod.settings, "advisory_scanners", "clamav")
+    r = auth_client.post(
+        ASYNC_URL,
+        json={
+            "url": "http://example.com/f.pdf",
+            "webhook_url": "http://callback.example.com/av",
+            "scanners": ["clamav"],
+        },
+    )
+    assert r.status_code == 400
+    assert "clamav cannot decide" in r.json()["detail"]
+
+
 def test_rejects_unknown_encryption_scheme(auth_client):
     r = auth_client.post(
         ASYNC_URL,
