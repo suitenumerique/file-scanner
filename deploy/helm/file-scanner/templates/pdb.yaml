@@ -1,0 +1,29 @@
+{{- if .Values.app.podDisruptionBudget.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "file-scanner.fullname" . }}-app
+  labels:
+    {{- include "file-scanner.labels" . | nindent 4 }}
+    app.kubernetes.io/component: app
+spec:
+  minAvailable: {{ .Values.app.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "file-scanner.selectorLabels" (dict "root" . "component" "app") | nindent 6 }}
+{{- end }}
+{{- if .Values.worker.podDisruptionBudget.enabled }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "file-scanner.fullname" . }}-worker
+  labels:
+    {{- include "file-scanner.labels" . | nindent 4 }}
+    app.kubernetes.io/component: worker
+spec:
+  minAvailable: {{ .Values.worker.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "file-scanner.selectorLabels" (dict "root" . "component" "worker") | nindent 6 }}
+{{- end }}
