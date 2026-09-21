@@ -1,0 +1,136 @@
+name: Publish Helm chart
+
+# Pushes the chart to GHCR as an OCI artifact, next to the image:
+#   oci://ghcr.io/<owner>/charts/file-scanner
+# A release tag vX.Y.Z publishes chart X.Y.Z with appVersion X.Y.Z — the
+# chart and the image it deploys share one version, nothing to bump by hand.
+# Manual runs, and pull requests touching the chart, publish a pre-release
+# from the current commit (<Chart.yaml version>-dev.<sha>, or -pr<n>.<sha>)
+# so a chart can be installed and reviewed before it is tagged.
+
+"on":
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Chart version to publish (default: <Chart.yaml version>-dev.<sha>)"
+        type: string
+        required: false
+        default: ""
+  pull_request:
+    paths:
+      - "deploy/helm/**"
+      - ".github/workflows/helm-publish.yml"
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Package and push
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      attestations: write
+      id-token: write
+    # A PR from a fork has no write token: it would fail at the push step,
+    # so only run for branches of this repository.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    env:
+      CHART_DIR: deploy/helm/file-scanner
+      REGISTRY: ghcr.io
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.16.2
+
+      - name: Resolve versions
+        id: version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          REF_NAME: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          chart_version=$(awk '/^version:/ {print $2}' "$CHART_DIR/Chart.yaml")
+          app_version=$(awk '/^appVersion:/ {gsub(/"/, "", $2); print $2}' "$CHART_DIR/Chart.yaml")
+          if [ "$REF_TYPE" = "tag" ]; then
+            # v1.2.3 → chart 1.2.3, app 1.2.3 (the image is published as 1.2.3 too).
+            version="${REF_NAME#v}"
+            app_version="$version"
+          elif [ -n "$PR_NUMBER" ]; then
+            version="${chart_version}-pr${PR_NUMBER}.${PR_SHA::7}"
+          elif [ -n "$INPUT_VERSION" ]; then
+            version="$INPUT_VERSION"
+          else
+            version="${chart_version}-dev.${GITHUB_SHA::7}"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "app_version=$app_version" >> "$GITHUB_OUTPUT"
+          echo "Publishing chart $version (appVersion $app_version)"
+
+      - name: Lint
+        run: make lint-helm
+
+      - name: Package
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          APP_VERSION: ${{ steps.version.outputs.app_version }}
+        run: |
+          helm package "$CHART_DIR" --version "$VERSION" --app-version "$APP_VERSION" --destination dist
+          ls -l dist
+
+      # Two logins: helm keeps its own credential store, and the attest
+      # step reads the Docker one to push the attestation to the registry.
+      - name: Log in to GHCR (helm)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: echo "$GITHUB_TOKEN" | helm registry login "$REGISTRY" --username "${{ github.actor }}" --password-stdin
+      - name: Log in to GHCR (docker, for the attestation push)
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push
+        id: push
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          out=$(helm push "dist/file-scanner-${VERSION}.tgz" "oci://${REGISTRY}/${OWNER}/charts" 2>&1)
+          echo "$out"
+          digest=$(sed -n 's/^Digest: //p' <<<"$out")
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "ref=${REGISTRY}/${OWNER}/charts/file-scanner" >> "$GITHUB_OUTPUT"
+
+      - name: Attest provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ${{ steps.push.outputs.ref }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+
+      - name: Summary
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          REF: ${{ steps.push.outputs.ref }}
+        run: |
+          {
+            echo "### Chart published"
+            echo
+            echo '```sh'
+            echo "helm install file-scanner oci://${REF} --version ${VERSION}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

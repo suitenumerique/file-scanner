@@ -104,9 +104,10 @@ The token **binds the request** — method + target, plus a SHA-256 of the JSON
 body on the async endpoint — so a captured token can't be replayed on a
 different call or with a swapped `webhook_url`. Mint one per request (see the
 [quick start](#quick-start) for a dev example). Outgoing webhooks are signed with
-the service's own key (`JWT_SIGNING_KEY`) and are verifiable at
-`/.well-known/jwks.json`. Requests without a valid token get `401`. Full model:
-[docs/security.md](docs/security.md#authentication).
+the service's own key (`JWT_SIGNING_KEY`, an Ed25519 seed you generate once —
+see [docs/deployment.md](docs/deployment.md#the-services-own-key-jwt_signing_key))
+and are verifiable at `/.well-known/jwks.json`. Requests without a valid token
+get `401`. Full model: [docs/security.md](docs/security.md#authentication).
 
 ## Monitoring
 

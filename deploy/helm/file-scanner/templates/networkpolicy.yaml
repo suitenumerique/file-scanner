@@ -1,0 +1,55 @@
+{{- /* The bundled redis has no password and clamd no auth at all: only the
+   app and worker pods of this release may reach them. Needs a CNI that
+   enforces NetworkPolicy. */}}
+{{- if .Values.networkPolicy.enabled }}
+{{- $callers := list "app" "worker" }}
+{{- if .Values.redis.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "file-scanner.fullname" . }}-redis
+  labels:
+    {{- include "file-scanner.labels" . | nindent 4 }}
+    app.kubernetes.io/component: redis
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "file-scanner.selectorLabels" (dict "root" . "component" "redis") | nindent 6 }}
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        {{- range $callers }}
+        - podSelector:
+            matchLabels:
+              {{- include "file-scanner.selectorLabels" (dict "root" $ "component" .) | nindent 14 }}
+        {{- end }}
+      ports:
+        - port: 6379
+          protocol: TCP
+{{- end }}
+{{- if .Values.clamav.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "file-scanner.fullname" . }}-clamav
+  labels:
+    {{- include "file-scanner.labels" . | nindent 4 }}
+    app.kubernetes.io/component: clamav
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "file-scanner.selectorLabels" (dict "root" . "component" "clamav") | nindent 6 }}
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        {{- range $callers }}
+        - podSelector:
+            matchLabels:
+              {{- include "file-scanner.selectorLabels" (dict "root" $ "component" .) | nindent 14 }}
+        {{- end }}
+      ports:
+        - port: 3310
+          protocol: TCP
+{{- end }}
+{{- end }}
