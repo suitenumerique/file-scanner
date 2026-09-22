@@ -271,7 +271,11 @@ class ScanReport:
             "scanners": [r.as_dict() for r in self.results],
         }
         unscannable = self.unscannable
-        deciding_error = any(r.kind == "error" for r in self.results if not r.advisory)
+        deciding_error = any(
+            r.kind == "error"
+            for results in self._by_category().values()
+            for r in self._deciding(results)
+        )
         if unscannable and not deciding_error:
             # The file itself is why a category is unknown: say so the way a
             # pre-scan failure does, so a caller neither trusts it nor retries.
@@ -408,16 +412,16 @@ def deciding_scanners(names: list[str]) -> list[str]:
     return [n for n in names if n not in advisory] or list(names)
 
 
-def assert_size_cap_decidable(names: list[str]) -> None:
+def assert_size_cap_decidable(names: list[str], cap: int, cap_name: str) -> None:
     """Refuse a selection clamav would decide on a file it cannot scan in
     full: past CLAMAV_MAX_FILE_BYTES clamd skips the file and reports it
-    clean. Boot checks the default selection; this covers a request naming
-    clamav alone while it is advisory. Raises ``ValueError`` (→ 400)."""
-    if settings.max_url_size > CLAMAV_MAX_FILE_BYTES and "clamav" in deciding_scanners(
-        names
-    ):
+    clean. ``cap`` is the size the endpoint admits (MAX_URL_SIZE for an async
+    scan, MAX_UPLOAD_SIZE for a sync one). Boot checks the default selection;
+    this covers a request naming clamav alone while it is advisory. Raises
+    ``ValueError`` (→ 400)."""
+    if cap > CLAMAV_MAX_FILE_BYTES and "clamav" in deciding_scanners(names):
         raise ValueError(
-            f"clamav cannot decide a scan with MAX_URL_SIZE above "
+            f"clamav cannot decide a scan with {cap_name} above "
             f"{CLAMAV_MAX_FILE_BYTES} bytes: name a deciding engine next to it"
         )
 
@@ -479,12 +483,16 @@ def validate_registry() -> None:
     clamav_decides = any(
         "clamav" in deciding_scanners(names) for names in cat_map.values()
     )
-    if settings.max_url_size > CLAMAV_MAX_FILE_BYTES and clamav_decides:
-        raise RuntimeError(
-            f"MAX_URL_SIZE ({settings.max_url_size}) is above what clamav can "
-            f"scan ({CLAMAV_MAX_FILE_BYTES} bytes): lower it, or drop clamav "
-            "from DEFAULT_SCANNERS or make it advisory (exav streams any size)"
-        )
+    for cap_name, cap in (
+        ("MAX_URL_SIZE", settings.max_url_size),
+        ("MAX_UPLOAD_SIZE", settings.max_upload_size),
+    ):
+        if cap > CLAMAV_MAX_FILE_BYTES and clamav_decides:
+            raise RuntimeError(
+                f"{cap_name} ({cap}) is above what clamav can scan "
+                f"({CLAMAV_MAX_FILE_BYTES} bytes): lower it, or drop clamav "
+                "from DEFAULT_SCANNERS or make it advisory (exav streams any size)"
+            )
 
 
 def run_scanners(names: list[str], open_file, api_client: str = "") -> ScanReport:

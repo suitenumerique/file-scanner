@@ -321,6 +321,10 @@ def scan(
     file.file.seek(0)
     if size > settings.max_upload_size:
         raise HTTPException(413, detail="File Too Large")
+    try:
+        assert_size_cap_decidable(names, settings.max_upload_size, "MAX_UPLOAD_SIZE")
+    except ValueError as exc:
+        raise HTTPException(400, detail=str(exc)) from exc
 
     # Read once (bounded by max_upload_size) so each scanner gets its own handle
     # and they can run in parallel.
@@ -345,7 +349,7 @@ def scan_async(
     """
     names = _resolve(body.categories, body.scanners)
     try:
-        assert_size_cap_decidable(names)
+        assert_size_cap_decidable(names, settings.max_url_size, "MAX_URL_SIZE")
     except ValueError as exc:
         raise HTTPException(400, detail=str(exc)) from exc
 

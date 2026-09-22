@@ -319,11 +319,17 @@ def test_size_cap_check_covers_a_request_deciding_with_advisory_clamav(monkeypat
     request naming clamav alone makes it decide, and is refused."""
     monkeypatch.setattr(scanner_mod.settings, "max_url_size", 3 * 1024**3)
     monkeypatch.setattr(scanner_mod.settings, "advisory_scanners", "clamav")
+    cap = scanner_mod.settings.max_url_size
     with pytest.raises(ValueError, match="clamav cannot decide"):
-        scanner_mod.assert_size_cap_decidable(["clamav"])
-    scanner_mod.assert_size_cap_decidable(["exav", "clamav"])  # exav decides
-    monkeypatch.setattr(scanner_mod.settings, "max_url_size", 1024)
-    scanner_mod.assert_size_cap_decidable(["clamav"])  # under the ceiling
+        scanner_mod.assert_size_cap_decidable(["clamav"], cap, "MAX_URL_SIZE")
+    scanner_mod.assert_size_cap_decidable(["exav", "clamav"], cap, "X")  # exav decides
+    scanner_mod.assert_size_cap_decidable(["clamav"], 1024, "X")  # under the ceiling
+
+
+def test_validate_registry_rejects_upload_cap_clamav_cannot_scan(monkeypatch):
+    monkeypatch.setattr(scanner_mod.settings, "max_upload_size", 3 * 1024**3)
+    with pytest.raises(RuntimeError, match=r"MAX_UPLOAD_SIZE .* above what clamav"):
+        validate_registry()
 
 
 def test_advisory_scanner_running_alone_decides():

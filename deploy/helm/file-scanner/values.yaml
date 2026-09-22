@@ -259,7 +259,8 @@ exav:
   # Allow a plain http:// dbUrl (an isolated in-cluster mirror).
   dbUrlAllowHttp: false
   # Instead of dbUrl: a Secret holding the URL, for one that carries
-  # credentials (basic auth) — it then never appears in the manifest.
+  # credentials (basic auth) — it then never appears in the manifest. The
+  # https:// rule holds; the chart cannot check a Secret's content.
   dbUrlSecret:
     name: ""
     key: EXAV_DB_URL
