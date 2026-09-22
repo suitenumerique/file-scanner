@@ -57,10 +57,34 @@ Rules:
   `?scanners=clamav` still yields a `malware` key because clamav declares that
   category.
 - **Strict aggregation within a category** is unchanged: clean only if every
-  scanner in that category scanned in full and found nothing.
+  deciding scanner in that category scanned in full and found nothing; a
+  scanner that could not (`error`, `unscannable`) makes the axis `null`.
 
 `transfers` reads only `malware`, so it is unaffected by any number of extra
 axes.
+
+## Advisory scanners
+
+`ADVISORY_SCANNERS` (comma-separated engine names) marks engines that scan
+**for information**: their detections count like any other, but a file they
+could not fully examine — a size or time limit, an unreadable container — does
+not stop the category from being asserted when a non-advisory engine of that
+category examined it in full. An advisory engine running alone still decides.
+Its results are flagged `"advisory": true` in `scanners[]`.
+
+What it is for: running a second engine next to the one that decides —
+an engine under evaluation, or clamav next to exav on files past clamav's
+2 GiB ceiling, where clamav answers `LIMITS-EXCEEDED` and exav has read the
+whole file. Without the role, strict aggregation makes two engines only as
+capable as the more limited one.
+
+| exav (deciding) | clamav (advisory) | `malware` |
+| --- | --- | --- |
+| clean | clean | `false` |
+| clean | unscannable / error | `false` — clamav's result is kept in `scanners[]` |
+| clean | malware | `true` — a detection always wins |
+| unscannable | clean | `null`, `error_kind: file` — the deciding engine did not complete |
+| error | clean | `null` — retried |
 
 ## Request grammar
 

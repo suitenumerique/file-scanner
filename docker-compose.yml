@@ -78,16 +78,19 @@ services:
       retries: 30
       start_period: 120s
 
-  # Optional second scanner (profile: exav). exav speaks the clamd protocol and
-  # loads ClamAV's databases, so it shares clamav's downloaded signature volume
-  # (read-only) and needs no updater of its own. Its image is gated/unpublished
-  # today — build from https://github.com/sylvinus/exav or point at your registry.
+  # Optional second scanner (profile: exav). exav (https://exav.org) speaks the
+  # clamd protocol but has no updater of its own — by design it leaves
+  # talking to ClamAV's CDN to freshclam/cvdupdate (the CDN refuses other
+  # clients). Here it compiles the signature files the clamav service keeps
+  # fresh, read-only from its volume (a few minutes on first start); a
+  # prebuilt .exavdb pulled over HTTP is the alternative (EXAV_DB_URL, see
+  # deploy/env/exav.defaults), and how the Helm chart runs it, clamav-free.
+  # Distroless image, runs as 65532.
   # Bring it up with:  docker compose --profile exav up -d exav
   # then `make test` runs the exav-marked tests (otherwise they skip).
   exav:
     profiles: ["exav"]
-    image: ghcr.io/sylvinus/exav:latest
-    platform: linux/amd64
+    image: ghcr.io/sylvinus/exav:0.0.1
     depends_on:
       clamav:
         condition: service_healthy
@@ -96,8 +99,16 @@ services:
       - deploy/env/exav.local
     volumes:
       - clamav_data:/var/lib/clamav:ro
+      - exav_data:/var/lib/exav
     ports:
       - 3311:3310
+    healthcheck:
+      test: ["CMD", "/exav", "--ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 90
+      # The first start fetches and compiles the signatures.
+      start_period: 600s
 
   # Broker for async scans. Redis 7+ for the dramatiq-redis-streams consumer
   # groups. The service is otherwise stateless (results are pushed via webhook).
@@ -108,3 +119,4 @@ services:
 
 volumes:
   clamav_data:
+  exav_data:

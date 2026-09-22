@@ -144,7 +144,25 @@ def _finalize(result, webhook_url, owner):
         deliver_webhook.send(webhook_url, result)
 
 
-def _check_limits(read_bytes, download_start):
+def _wire_cap(encryption_params) -> int:
+    """The most bytes a source may send: ``MAX_URL_SIZE`` counts the file —
+    the plaintext — so a client-encrypted source gets the room its chunking
+    adds (one IV + tag per chunk of ``MAX_URL_SIZE`` plaintext). Malformed
+    params fall back to the bare cap; decryption rejects them properly."""
+    cap = settings.max_url_size
+    if not encryption_params:
+        return cap
+    try:
+        chunk_size = int(encryption_params["chunk_size"])
+    except (KeyError, TypeError, ValueError):
+        return cap
+    if chunk_size <= 0:
+        return cap
+    chunks = max(1, -(-cap // chunk_size))
+    return cap + chunks * encryption.OVERHEAD_PER_CHUNK
+
+
+def _check_limits(read_bytes, download_start, wire_cap):
     """Enforce the size + total-time download budgets mid-stream (raises
     ``FileError``). The per-read socket timeout alone can't stop a server that
     dribbles one byte just inside each window (slow-drip DoS), and a missing or
@@ -154,9 +172,9 @@ def _check_limits(read_bytes, download_start):
             f"download_timeout: exceeded {settings.download_max_seconds}s "
             "total transfer budget"
         )
-    if read_bytes > settings.max_url_size:
+    if read_bytes > wire_cap:
         raise FileError(
-            f"file_too_large: streamed over {settings.max_url_size} bytes "
+            f"file_too_large: streamed over {wire_cap} bytes "
             "(Content-Length missing or understated)"
         )
 
@@ -171,7 +189,7 @@ def _write_plaintext(response, file_path, download_start):
     with contextlib.closing(response), open(file_path, "wb") as f:
         for chunk in response.iter_content(chunk_size=8192):
             read += len(chunk)
-            _check_limits(read, download_start)
+            _check_limits(read, download_start, settings.max_url_size)
             f.write(chunk)
 
 
@@ -179,7 +197,8 @@ def _write_decrypted(response, file_path, download_start, enc):
     """Stream the ciphertext, decrypt chunk by chunk, write plaintext.
 
     Buffers wire bytes until a whole crypto chunk is available; only the tail may
-    be short. The cap counts ciphertext bytes, which bounds the plaintext too.
+    be short. The wire is bounded by ``MAX_URL_SIZE`` plus the chunking
+    overhead, and the plaintext written by ``MAX_URL_SIZE`` itself.
     """
     scheme = enc.get("scheme", encryption.SCHEME)
     if scheme not in encryption.SCHEMES:
@@ -199,32 +218,41 @@ def _write_decrypted(response, file_path, download_start, enc):
     if parts < 0:
         raise encryption.DecryptionError(f"invalid parts {parts}")
     blob_size = chunk_size + encryption.OVERHEAD_PER_CHUNK
+    wire_cap = _wire_cap(enc)
+
+    def _write_plain(f, plain, written):
+        written += len(plain)
+        if written > settings.max_url_size:
+            raise FileError(
+                f"file_too_large: plaintext over {settings.max_url_size} bytes"
+            )
+        f.write(plain)
+        return written
 
     buffer = bytearray()
     part_number = 0
     read = 0
+    written = 0
     with contextlib.closing(response), open(file_path, "wb") as f:
         for chunk in response.iter_content(chunk_size=8192):
             read += len(chunk)
-            _check_limits(read, download_start)
+            _check_limits(read, download_start, wire_cap)
             buffer.extend(chunk)
             while len(buffer) >= blob_size:
                 part_number += 1
-                f.write(
-                    encryption.decrypt_chunk(
-                        key, bytes(buffer[:blob_size]), file_id, part_number, parts
-                    )
+                plain = encryption.decrypt_chunk(
+                    key, bytes(buffer[:blob_size]), file_id, part_number, parts
                 )
+                written = _write_plain(f, plain, written)
                 del buffer[:blob_size]
         # A shorter tail chunk just means the plaintext wasn't an exact multiple
         # of chunk_size; an empty buffer here means it was.
         if buffer:
             part_number += 1
-            f.write(
-                encryption.decrypt_chunk(
-                    key, bytes(buffer), file_id, part_number, parts
-                )
+            plain = encryption.decrypt_chunk(
+                key, bytes(buffer), file_id, part_number, parts
             )
+            written = _write_plain(f, plain, written)
     # Trailing-truncation guard: per-chunk auth can't see whole trailing chunks
     # dropped on a boundary, so the caller-declared total (bound into every
     # chunk's AAD) must match what we actually decrypted.
@@ -279,17 +307,18 @@ def scan_task(
         # Size guard, defence in depth: trust the Content-Length header for a
         # cheap up-front reject, then also cap the bytes actually written — a
         # missing, malformed or understated header must not let an unbounded
-        # body fill the scan volume.
+        # body fill the scan volume. The wire cap is MAX_URL_SIZE plus, for a
+        # client-encrypted source, the room its chunking adds.
+        wire_cap = _wire_cap(encryption_params)
         declared = response.headers.get("Content-Length")
         try:
             declared = int(declared) if declared else None
         except ValueError:
             declared = None
-        if declared and declared > settings.max_url_size:
+        if declared and declared > wire_cap:
             response.close()
             raise FileError(
-                f"file_too_large: {declared} bytes exceeds "
-                f"{settings.max_url_size} limit"
+                f"file_too_large: {declared} bytes exceeds {wire_cap} limit"
             )
 
         # Stream to disk (both writers enforce the size + total-time budgets via

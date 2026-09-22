@@ -117,6 +117,23 @@ def test_creates_job_with_encryption(auth_client):
     assert r.status_code == 202
 
 
+def test_rejects_a_scan_clamav_would_decide_past_its_ceiling(auth_client, monkeypatch):
+    import scanner as scanner_mod
+
+    monkeypatch.setattr(scanner_mod.settings, "max_url_size", 3 * 1024**3)
+    monkeypatch.setattr(scanner_mod.settings, "advisory_scanners", "clamav")
+    r = auth_client.post(
+        ASYNC_URL,
+        json={
+            "url": "http://example.com/f.pdf",
+            "webhook_url": "http://callback.example.com/av",
+            "scanners": ["clamav"],
+        },
+    )
+    assert r.status_code == 400
+    assert "clamav cannot decide" in r.json()["detail"]
+
+
 def test_rejects_unknown_encryption_scheme(auth_client):
     r = auth_client.post(
         ASYNC_URL,
@@ -267,11 +284,15 @@ def test_task_infected(run_task):
 
 def test_task_unscannable(run_task):
     # clamav backend flattens an ERROR to UNSCANNABLE (exav preserves the tag).
+    # The file was not examined in full: the axis is unknown, and the report
+    # blames the file so the caller blocks it without retrying.
     (sent,) = run_task(verdict=("ERROR", "Encrypted data"))
-    assert sent["malware"] is False
+    assert sent["status"] == "done"
+    assert sent["malware"] is None
     assert sent["scanners"][0]["kind"] == "unscannable"
     assert sent["scanners"][0]["reason"] == "UNSCANNABLE"
-    assert "error_kind" not in sent
+    assert sent["error_kind"] == "file"
+    assert sent["error"] == "not fully scanned: clamav (UNSCANNABLE)"
 
 
 def test_task_all_scanners_error_is_transient(run_task):
@@ -301,6 +322,43 @@ def test_task_ssrf_blocked_is_file(run_task):
 def test_task_too_large_is_file(run_task):
     (sent,) = run_task(content_length=settings.max_url_size + 1)
     assert sent["error_kind"] == "file"
+
+
+def test_task_cap_counts_the_plaintext_of_an_encrypted_source(run_task, monkeypatch):
+    """MAX_URL_SIZE bounds the file the scanners see: a ciphertext over it by
+    exactly its chunking overhead is accepted, one plaintext byte more is
+    not."""
+    cap = 2 * _CHUNK
+    monkeypatch.setattr(tasks.settings, "max_url_size", cap)
+    plaintext = b"P" * cap  # two full chunks: wire = cap + 2 * 28
+    wire = _encrypt(plaintext)
+    assert len(wire) == cap + 2 * encryption.OVERHEAD_PER_CHUNK
+    scanned = []
+    (sent,) = run_task(
+        chunks=[wire],
+        content_length=len(wire),
+        encryption_params=_params(plaintext),
+        scanned=scanned,
+    )
+    assert "error_kind" not in sent
+    assert scanned == [plaintext]
+
+    plaintext = b"P" * (cap + 1)  # one byte over: a third (tiny) chunk
+    wire = _encrypt(plaintext)
+    (sent,) = run_task(
+        chunks=[wire], content_length=len(wire), encryption_params=_params(plaintext)
+    )
+    assert sent["error_kind"] == "file"
+    assert sent["error"].startswith("file_too_large")
+
+
+def test_task_encrypted_wire_over_its_room_is_rejected_up_front(run_task, monkeypatch):
+    cap = 2 * _CHUNK
+    monkeypatch.setattr(tasks.settings, "max_url_size", cap)
+    room = cap + 2 * encryption.OVERHEAD_PER_CHUNK
+    (sent,) = run_task(content_length=room + 1, encryption_params=_params(b"P" * cap))
+    assert sent["error_kind"] == "file"
+    assert sent["error"].startswith("file_too_large")
 
 
 def test_task_unbounded_body_capped_as_file(run_task, monkeypatch):

@@ -75,6 +75,14 @@ class Settings(BaseSettings):
     # nor `scanners`. Every entry must be a key of DEFAULT_SCANNERS.
     # (DEFAULT_CATEGORIES)
     default_categories: str = "malware"
+    # Comma-separated engine names that scan for information only: their
+    # detections count, but a file they could not fully examine (a size or
+    # time limit, an unreadable container) does not stop the category from
+    # being clean when a non-advisory engine of that category scanned it in
+    # full. For running a second engine next to the one that decides — an
+    # engine under evaluation, or clamav next to exav past clamav's 2 GiB
+    # ceiling. An engine running alone always decides. (ADVISORY_SCANNERS)
+    advisory_scanners: str = ""
 
     # --- clamav backend ---
     # DNS TXT record queried for the latest published signature database version,
@@ -134,10 +142,12 @@ class Settings(BaseSettings):
     # --- Size & time limits ---
     # Max size of a direct upload to /api/v1.0/scan; larger → 413. (MAX_UPLOAD_SIZE)
     max_upload_size: int = 100 * 1024 * 1024  # 100 MiB
-    # Max size of a file fetched by /api/v1.0/scan-async; enforced against both
-    # Content-Length and the bytes actually streamed. (MAX_URL_SIZE)
-    # The default is the most clamav scans in one file (libclamav's
-    # INT_MAX - 2); see scanner.CLAMAV_MAX_FILE_BYTES.
+    # Max size of a file fetched by /api/v1.0/scan-async — of the file the
+    # scanners see, i.e. the plaintext for a client-encrypted source (its wire
+    # bytes get the chunking overhead on top). Enforced against Content-Length,
+    # the bytes streamed and the bytes decrypted. The default is the most
+    # clamav scans in one file (libclamav's INT_MAX - 2); see
+    # scanner.CLAMAV_MAX_FILE_BYTES. (MAX_URL_SIZE)
     max_url_size: int = 2**31 - 3  # 2,147,483,645
     # Scratch directory the async worker downloads a file into before streaming
     # it to the scanner (INSTREAM) — it holds the download, not the scan (which

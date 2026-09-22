@@ -1,5 +1,17 @@
 # Dev defaults for the optional exav scanner (docker compose, profile: exav).
 # Local overrides go in deploy/env/exav.local (gitignored).
 
-# Load clamav's shared signature DB read-only; don't self-update.
-CLAMAV_NO_FRESHCLAMD=true
+# Signatures: exav has no updater of its own (ClamAV's CDN only serves
+# freshclam/cvdupdate), so it reads the files the clamav service keeps fresh
+# from its volume and compiles them on start (a few minutes and ~3.6 GB of
+# RAM for the spike; recompiled when they change). To load a prebuilt database instead —
+# cheaper, and the way production runs it (docs/deployment.md#running-exav) —
+# set both in exav.local:
+#   EXAV_DB_URL=https://…/your.exavdb
+#   EXAV_SIG_DIR=/var/lib/exav       # the daemon's own, writable volume
+EXAV_SIG_DIR=/var/lib/clamav
+# Temp space one streamed file may take while it is scanned, and the wall
+# clock one scan may run: above the service's MAX_URL_SIZE (2 GiB), like
+# clamd's StreamMaxLength.
+EXAV_MAX_SPILL_BYTES=2200M
+EXAV_MAX_SCAN_SECS=900

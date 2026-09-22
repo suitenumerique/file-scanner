@@ -111,6 +111,21 @@ def test_validate_registry_rejects_url_size_clamav_cannot_scan(monkeypatch):
         validate_registry()
 
 
+def test_validate_registry_allows_big_downloads_with_advisory_clamav(monkeypatch):
+    """An advisory clamav defers to the deciding engine past its ceiling."""
+    monkeypatch.setattr(scanner_mod.settings, "max_url_size", 3 * 1024**3)
+    monkeypatch.setattr(scanner_mod.settings, "exav_hosts", "exav1:3310")
+    monkeypatch.setattr(scanner_mod.settings, "advisory_scanners", "clamav")
+    monkeypatch.setattr(
+        scanner_mod.settings, "default_scanners", '{"malware": ["exav", "clamav"]}'
+    )
+    scanner_mod._cache.pop("exav", None)
+    try:
+        validate_registry()
+    finally:
+        scanner_mod._cache.pop("exav", None)
+
+
 def test_validate_registry_allows_big_downloads_without_clamav(monkeypatch):
     monkeypatch.setattr(scanner_mod.settings, "max_url_size", 3 * 1024**3)
     monkeypatch.setattr(scanner_mod.settings, "exav_hosts", "exav1:3310")
@@ -194,6 +209,152 @@ def test_report_partial_error_axis_is_unknown():
     )
     assert report.categories() == {"malware": None}
     assert report.as_dict()["malware"] is None
+
+
+def test_report_unscannable_is_not_clean():
+    """A file a scanner could not examine (encrypted container, a limit hit)
+    is never asserted clean: the axis is unknown, and the report says the
+    file is why, so a caller blocks it without retrying."""
+    report = ScanReport([_malware("clamav", "unscannable", "PASSWORD-PROTECTED")])
+    assert not report.malware
+    assert not report.all_errored
+    assert report.categories() == {"malware": None}
+    d = report.as_dict()
+    assert d["malware"] is None
+    assert d["error_kind"] == "file"
+    assert d["error"] == "not fully scanned: clamav (PASSWORD-PROTECTED)"
+
+
+def test_report_unscannable_next_to_clean_is_still_unknown():
+    report = ScanReport(
+        [
+            _malware("exav", "clean"),
+            _malware("clamav", "unscannable", "LIMITS-EXCEEDED"),
+        ]
+    )
+    assert report.categories() == {"malware": None}
+    assert report.as_dict()["error_kind"] == "file"
+
+
+def test_report_unscannable_next_to_transient_error_is_not_a_file_error():
+    # A sibling that failed transiently may still scan the file on retry:
+    # don't pin the outcome on the file.
+    report = ScanReport(
+        [_malware("exav", "error", "down"), _malware("clamav", "unscannable", "X")]
+    )
+    d = report.as_dict()
+    assert d["malware"] is None
+    assert "error_kind" not in d
+
+
+def test_report_detection_beats_unscannable():
+    report = ScanReport(
+        [_malware("exav", "malware", "Sig"), _malware("clamav", "unscannable", "X")]
+    )
+    d = report.as_dict()
+    assert d["malware"] is True
+    assert "error_kind" not in d
+
+
+# --- advisory scanners: they inform, a deciding scanner asserts ---
+
+
+def test_advisory_incomplete_is_ignored_when_a_deciding_scanner_is_clean():
+    """clamav next to exav past clamav's ceiling: exav read the whole file."""
+    report = ScanReport(
+        [
+            _malware("exav", "clean"),
+            _malware("clamav", "unscannable", "LIMITS-EXCEEDED", advisory=True),
+        ]
+    )
+    d = report.as_dict()
+    assert d["malware"] is False
+    assert "error_kind" not in d
+    assert d["scanners"][1]["advisory"] is True
+    assert "advisory" not in d["scanners"][0]
+
+
+def test_advisory_transient_error_is_ignored_too():
+    report = ScanReport(
+        [_malware("exav", "clean"), _malware("clamav", "error", "down", advisory=True)]
+    )
+    assert report.categories() == {"malware": False}
+    assert not report.all_errored
+
+
+def test_advisory_detection_still_wins():
+    report = ScanReport(
+        [_malware("exav", "clean"), _malware("clamav", "malware", "Sig", advisory=True)]
+    )
+    assert report.categories() == {"malware": True}
+
+
+def test_advisory_does_not_rescue_a_deciding_scanner_that_did_not_complete():
+    report = ScanReport(
+        [
+            _malware("exav", "unscannable", "PASSWORD-PROTECTED"),
+            _malware("clamav", "clean", advisory=True),
+        ]
+    )
+    d = report.as_dict()
+    assert d["malware"] is None
+    assert d["error_kind"] == "file"
+
+
+def test_all_errored_looks_at_deciding_scanners_only():
+    """The deciding engine down and the advisory one fine: nothing that can
+    assert a verdict scanned the file, so the job is retried as a whole."""
+    report = ScanReport(
+        [_malware("exav", "error", "down"), _malware("clamav", "clean", advisory=True)]
+    )
+    assert report.all_errored
+    report = ScanReport(
+        [_malware("exav", "clean"), _malware("clamav", "error", "down", advisory=True)]
+    )
+    assert not report.all_errored
+
+
+def test_size_cap_check_covers_a_request_deciding_with_advisory_clamav(monkeypatch):
+    """Boot lets an advisory clamav sit next to a cap above its ceiling; a
+    request naming clamav alone makes it decide, and is refused."""
+    monkeypatch.setattr(scanner_mod.settings, "max_url_size", 3 * 1024**3)
+    monkeypatch.setattr(scanner_mod.settings, "advisory_scanners", "clamav")
+    cap = scanner_mod.settings.max_url_size
+    with pytest.raises(ValueError, match="clamav cannot decide"):
+        scanner_mod.assert_size_cap_decidable(["clamav"], cap, "MAX_URL_SIZE")
+    scanner_mod.assert_size_cap_decidable(["exav", "clamav"], cap, "X")  # exav decides
+    scanner_mod.assert_size_cap_decidable(["clamav"], 1024, "X")  # under the ceiling
+
+
+def test_validate_registry_rejects_upload_cap_clamav_cannot_scan(monkeypatch):
+    monkeypatch.setattr(scanner_mod.settings, "max_upload_size", 3 * 1024**3)
+    with pytest.raises(RuntimeError, match=r"MAX_UPLOAD_SIZE .* above what clamav"):
+        validate_registry()
+
+
+def test_advisory_scanner_running_alone_decides():
+    report = ScanReport([_malware("clamav", "unscannable", "X", advisory=True)])
+    assert report.categories() == {"malware": None}
+    report = ScanReport([_malware("clamav", "clean", advisory=True)])
+    assert report.categories() == {"malware": False}
+
+
+def test_run_scanners_marks_advisory_results(monkeypatch):
+    monkeypatch.setattr(scanner_mod.settings, "advisory_scanners", "clamav, exav")
+    monkeypatch.setattr(scanner_mod.settings, "exav_hosts", "exav1:3310")
+    scanner_mod._cache.pop("exav", None)
+    try:
+        with mock.patch.object(ExavScanner, "scan", return_value=Verdict("clean")):
+            report = run_scanners(["exav"], lambda: io.BytesIO(b"x"))
+    finally:
+        scanner_mod._cache.pop("exav", None)
+    assert report.results[0].advisory is True
+
+
+def test_validate_registry_rejects_unknown_advisory_scanner(monkeypatch):
+    monkeypatch.setattr(scanner_mod.settings, "advisory_scanners", "bogus")
+    with pytest.raises(RuntimeError, match="ADVISORY_SCANNERS names unknown"):
+        validate_registry()
 
 
 def test_report_as_dict_omits_null_reason():
@@ -398,11 +559,11 @@ def test_exav_uses_its_own_pool_and_skips_version(monkeypatch):
 
 
 def test_exav_parse_clean():
-    assert ExavScanner._parse_verdict('{"v":1,"verdict":"clean"}').kind == "clean"
+    assert ExavScanner._parse_verdict('{"status":"OK","v":1}').kind == "clean"
 
 
 def test_exav_parse_malware_top_level():
-    v = ExavScanner._parse_verdict('{"v":1,"verdict":"malware","signature":"Eicar"}')
+    v = ExavScanner._parse_verdict('{"signature":"Eicar","status":"FOUND","v":1}')
     assert v.kind == "malware"
     assert v.reason == "Eicar"
     assert v.location is None
@@ -410,24 +571,27 @@ def test_exav_parse_malware_top_level():
 
 def test_exav_parse_malware_with_location():
     v = ExavScanner._parse_verdict(
-        '{"v":1,"verdict":"malware","signature":"Eicar","location":"a.zip/dir/e.exe"}'
+        '{"location":"a.zip/dir/e.exe","signature":"Eicar","status":"FOUND","v":1}'
     )
     assert v.reason == "Eicar"
     assert v.location == "a.zip/dir/e.exe"
 
 
 @pytest.mark.parametrize(
-    "tag", ["PASSWORD-PROTECTED", "LIMITS-EXCEEDED", "UNSCANNABLE"]
+    "category", ["PASSWORD-PROTECTED", "LIMITS-EXCEEDED", "UNSCANNABLE"]
 )
-def test_exav_parse_unscannable(tag):
-    v = ExavScanner._parse_verdict(f'{{"v":1,"verdict":"unscannable","tag":"{tag}"}}')
+def test_exav_parse_partial_is_unscannable(category):
+    v = ExavScanner._parse_verdict(
+        f'{{"category":"{category}","reason":"encrypted ZIP member",'
+        f'"status":"PARTIAL","v":1}}'
+    )
     assert v.kind == "unscannable"
-    assert v.reason == tag
+    assert v.reason == category
 
 
 def test_exav_parse_error_raises():
     with pytest.raises(ScannerError, match="oom"):
-        ExavScanner._parse_verdict('{"v":1,"verdict":"error","message":"oom"}')
+        ExavScanner._parse_verdict('{"reason":"oom","status":"ERROR","v":1}')
 
 
 def test_exav_parse_unknown_command_raises():
@@ -435,7 +599,7 @@ def test_exav_parse_unknown_command_raises():
         ExavScanner._parse_verdict("UNKNOWN COMMAND\n")
 
 
-@pytest.mark.parametrize("raw", ["not json", '{"v":1,"verdict":"weird"}'])
+@pytest.mark.parametrize("raw", ["not json", '{"status":"WEIRD","v":1}'])
 def test_exav_parse_bad_reply_raises(raw):
     with pytest.raises(ScannerError):
         ExavScanner._parse_verdict(raw)
@@ -445,7 +609,7 @@ def test_exav_scan_over_exinstream(monkeypatch):
     # scan() streams over EXINSTREAM and maps the JSON reply, location included.
     monkeypatch.setattr(scanner_mod.settings, "exav_hosts", "exav1:3310")
     sc = ExavScanner()
-    reply = '{"v":1,"verdict":"malware","signature":"Eicar","location":"a.zip/e.exe"}'
+    reply = '{"location":"a.zip/e.exe","signature":"Eicar","status":"FOUND","v":1}'
     with mock.patch.object(sc, "_client") as client:
         client.return_value.exinstream.return_value = reply
         v = sc.scan(b"data")
