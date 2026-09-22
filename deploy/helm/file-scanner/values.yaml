@@ -260,7 +260,10 @@ exav:
   dbUrlAllowHttp: false
   # Instead of dbUrl: a Secret holding the URL, for one that carries
   # credentials (basic auth) — it then never appears in the manifest. The
-  # https:// rule holds; the chart cannot check a Secret's content.
+  # value must be an https:// URL for the same reason as dbUrl (exav does
+  # not verify the database's signature). The chart cannot read a Secret,
+  # so it neither checks this nor applies dbUrlAllowHttp to it: the
+  # operator is responsible for the scheme.
   dbUrlSecret:
     name: ""
     key: EXAV_DB_URL

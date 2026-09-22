@@ -49,7 +49,8 @@ the chart owns.
 | `clamav.enabled` | `true` | Bundled clamd. Set `false` and `config.CLAMAV_HOSTS` for an external pool. |
 | `clamav.conf.*` | 2200M | `StreamMaxLength` / `MaxFileSize` / `MaxScanSize` — must clear `MAX_URL_SIZE`, else big files are cut mid-stream or skipped and reported clean. |
 | `clamav.persistence` | 2Gi PVC | Signature database; `Recreate` strategy because RWO. |
-| `exav.enabled` / `exav.dbUrl` | `false` | Bundled [exav](https://exav.org) fed with a prebuilt `.exavdb` over HTTPS (`exav.dbUrlAllowHttp=true` for an isolated plain-HTTP mirror; `exav.dbUrlSecret` for a URL with credentials); add `exav` to `config.DEFAULT_SCANNERS` to scan with both engines. |
+| `exav.enabled` | `false` | Bundled [exav](https://exav.org) as a second engine; add `exav` to `config.DEFAULT_SCANNERS` (with `config.ADVISORY_SCANNERS=clamav` to let it decide past clamav's 2 GiB ceiling). |
+| `exav.dbUrl` | `""` (required when enabled) | The prebuilt `.exavdb` the daemon pulls over HTTPS and polls (`exav.dbUrlAllowHttp=true` for an isolated plain-HTTP mirror; `exav.dbUrlSecret` for a URL with credentials). |
 | `redis.enabled` | `true` | Bundled, non-persistent broker. `false` ⇒ set `secrets.WORKER_BROKER_URL`. |
 | `worker.queues` | `webhooks scans` | Run a second release with `scans` / `webhooks` split to keep callbacks prompt under a backlog. |
 | `worker.downloadSizeLimit` | 8Gi | emptyDir for async downloads: ≥ `MAX_URL_SIZE` × concurrent scans. |
