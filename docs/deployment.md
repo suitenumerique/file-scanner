@@ -137,6 +137,45 @@ secrets** — the `*.defaults` keys are throwaway.
 | `ALLOWED_URL_HOSTS` | *(empty)* | If set, **only** these hostnames may be submitted (positive allowlist). |
 | `SSRF_ALLOWED_HOSTS` | *(empty)* | Hosts trusted to resolve to a private/internal address (SSRF bypass). |
 
+## API versions and upgrading
+
+Two versions are served side by side, and the path is the contract:
+
+| | `/api/v1.0/` | `/api/v2.0/` |
+| --- | --- | --- |
+| scan result | flat per-category scalars, `error_kind`, `error` | [`verdicts`](categories.md), one per category — the words are in [glossary.md](glossary.md#3-the-five-words) |
+| status | frozen — no new shape lands here | current |
+
+Both are serialisations of the **same** computation, so a file cannot be judged
+one way on one route and another way on the other; the downgrade lives in
+[`src/wire.py`](../src/wire.py) and nowhere else. **Deploying this version
+therefore breaks no caller and needs no coordination**: a v1 caller keeps its
+endpoint and its shape, and moves when it chooses by changing the version in the
+path it posts to.
+
+Two operational notes, both easy to miss.
+
+**The JWT is bound to the path it was minted for** (`htu`). A caller moving to
+v2 must sign `/api/v2.0/scan-async`, not just post to it — otherwise it gets a
+401, not a shape problem.
+
+**A webhook has no route of its own.** Its body is shaped by the version the job
+was *submitted* under, and stamped with it (`"api_version": "v2.0"`), because a
+scan outlives a deploy: a job submitted before a caller upgrades is delivered
+after it. A caller should read that stamp rather than sniff for keys, and on a
+version it does not read, acknowledge the callback with a 200 and re-submit the
+scan — refusing delivery only makes the scanner re-send the same body until it
+dead-letters.
+
+**The one thing that does break: the `verdict` label on
+`filescanner_scans_total` renamed `unscannable` to `partial`**, matching the
+word the verdict now uses. This is not covered by the API versioning — metrics
+have no version. Any dashboard panel or alert rule selecting
+`verdict="unscannable"` reports zero from the moment this version starts,
+including, if you have one, the alert that tells you files are going unscanned.
+Update those rules before deploying: they are out of tree, so nothing here will
+fail to warn you.
+
 ## Running locally
 
 Requires Docker. `make help` lists every target.
@@ -184,10 +223,11 @@ APP_CONFIG=config.CiConfig uv run pytest
 
 [exav](https://exav.org) is the second malware engine (see
 [scanner-backends.md](scanner-backends.md#exav)). The daemon speaks the clamd
-protocol on 3310 and takes the same `host:port,…` pool, `EXAV_HOSTS`; it runs
-next to clamav, not instead of it, and only scans when named — add it to
-`DEFAULT_SCANNERS` (`{"malware": ["clamav", "exav"]}`) to run both on every
-scan, or select it per request with `scanners`.
+protocol on 3310 and takes the same `host:port,…` pool, `EXAV_HOSTS`. Whether
+it runs next to clamav or instead of it is configuration: it only scans when
+named, so list it in `DEFAULT_SCANNERS` — `{"malware": ["clamav", "exav"]}`
+to run both on every scan, `{"malware": ["exav"]}` to replace clamav — or
+select it per request with `scanners`.
 
 ### 1. Signatures: exav brings none
 
@@ -256,7 +296,8 @@ check, which only passes once the database is loaded. Give it a writable
 ```sh
 printf 'nPING\n' | nc <exav-host> 3310          # PONG once the database is loaded
 curl -sf -H "Authorization: Bearer $TOKEN" -F "file=@eicar.txt" \
-     "http://localhost:8090/api/v1.0/scan?scanners=exav"   # → "malware": true
+     "http://localhost:8090/api/v1.0/scan?scanners=exav"
+# → "verdicts": {"malware": {"kind": "malware", "reason": "Eicar-Test-Signature"}}
 ```
 
 Every report — the sync response and the webhook payload — lists each
@@ -377,7 +418,7 @@ CLAMD_CONF_AlertExceedsMax=yes
 `AlertExceedsMax` closes the remaining hole: any limit clamd still hits
 (time, size, recursion, ratio) is reported as
 `Heuristics.Limits.Exceeded.<Limit> FOUND` instead of `OK`, and the clamav
-backend maps that report to an `unscannable` verdict (`LIMITS-EXCEEDED`) —
+backend maps that report to a `partial` verdict (`LIMITS-EXCEEDED`) —
 the file is neither clean nor a detection, and stays blocked, exactly as
 exav reports the same outcome.
 

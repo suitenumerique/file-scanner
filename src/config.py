@@ -100,7 +100,7 @@ class Settings(BaseSettings):
     # — client-side balancing, no external load balancer needed. (CLAMAV_HOSTS)
     clamav_hosts: str = "localhost:3310"
 
-    # --- exav backend (its own daemon pool; can run alongside clamav) ---
+    # --- exav backend (its own daemon pool; runs alongside clamav or instead) ---
     # Comma-separated ``host:port`` list for the exav pool (balanced per scan like
     # CLAMAV_HOSTS). Required to use the exav scanner. (EXAV_HOSTS)
     exav_hosts: str = ""

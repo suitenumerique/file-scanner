@@ -26,7 +26,7 @@ import struct
 import clamd
 
 from config import get_settings
-from scanner import ScannerError, Verdict, VersionInfo, clean, unscannable
+from scanner import ScannerError, Verdict, VersionInfo, clean, partial
 from scanners.clamav import ClamavScanner, parse_hosts
 
 settings = get_settings()
@@ -99,7 +99,7 @@ class ExavScanner(ClamavScanner):
         if status == "PARTIAL":
             # Not fully examined — a property of the file, never clean. exav
             # states the class outright — no tag-vs-sentence guessing.
-            return unscannable(data.get("category") or "UNSCANNABLE")
+            return partial(data.get("category") or "UNSCANNABLE")
         if status == "ERROR":
             # exav itself failed — a transient/infra failure, retryable.
             raise ScannerError(

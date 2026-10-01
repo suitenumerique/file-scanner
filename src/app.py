@@ -22,6 +22,7 @@ from pydantic import BaseModel, Field, HttpUrl, field_validator
 import encryption
 import jwt_auth
 import results
+import wire
 from config import get_settings
 from metrics import refresh_signatures
 from scanner import (
@@ -297,8 +298,10 @@ def healthcheck():
     return PlainTextResponse("Service Unavailable", status_code=503)
 
 
+@app.post("/api/v2.0/scan")
 @app.post("/api/v1.0/scan")
 def scan(
+    request: Request,
     file: UploadFile = File(...),
     username: str = Depends(auth_sync),
     categories: Annotated[
@@ -313,7 +316,8 @@ def scan(
         Query(description="Comma-separated scanner names; unions with categories."),
     ] = None,
 ):
-    """Scan an uploaded file; returns per-category aggregates + a per-scanner report."""
+    """Scan an uploaded file; returns the per-category verdicts + a per-scanner
+    report, in the shape the requested API version speaks (see :mod:`wire`)."""
     names = _resolve(_split(categories), _split(scanners))
 
     file.file.seek(0, 2)
@@ -332,20 +336,27 @@ def scan(
     logger.info(f"Scanning {file.filename} for {username} with {names}")
     report = run_scanners(names, lambda: io.BytesIO(data), api_client=username)
     if report.all_errored:
-        # Every scanner failed to run — says nothing about the file.
+        # Every deciding scanner failed to run and nothing was detected — the
+        # report says nothing about the file. A detection keeps the 200.
         raise HTTPException(503, detail="scan temporarily unavailable")
-    return report.as_dict()
+    return wire.serialize(report.as_dict(), wire.of_path(request.url.path))
 
 
+@app.post("/api/v2.0/scan-async", status_code=202)
 @app.post("/api/v1.0/scan-async", status_code=202)
 def scan_async(
+    request: Request,
     body: ScanAsyncRequest,
     username: str = Depends(auth_async),
 ):
     """Queue an asynchronous scan. The result is delivered via the ``webhook_url``
     callback and, when the result store is enabled (``WORKER_RESULT_TTL > 0``), also
-    persisted for polling at ``GET /api/v1.0/jobs/{job_id}``. At least one channel
+    persisted for polling at ``GET /api/vX.0/jobs/{job_id}``. At least one channel
     must exist: ``webhook_url`` is required unless the store is enabled.
+
+    The webhook has no route of its own, so the API version this job was
+    submitted under travels with it and decides the shape of the callback body.
+    A poll, having a route, is served in the version it asks for.
     """
     names = _resolve(body.categories, body.scanners)
     try:
@@ -377,6 +388,7 @@ def scan_async(
         body.metadata,
         username,
         body.encryption.model_dump() if body.encryption else None,
+        wire.of_path(request.url.path),
     )
     # Seed a pending record so a poll right after the 202 sees the job (the worker
     # overwrites it with the terminal result). No-op when the store is disabled.
@@ -398,10 +410,14 @@ def scan_async(
     return {"job_id": job_id, "status": "pending"}
 
 
+@app.get("/api/v2.0/jobs/{job_id}")
 @app.get("/api/v1.0/jobs/{job_id}")
-def job_status(job_id: str, username: str = Depends(auth_sync)):
-    """Poll an async scan by id. Returns the stored record — the same shape the
-    webhook delivers, with a ``status`` of ``pending`` / ``done`` / ``error`` — or
+def job_status(request: Request, job_id: str, username: str = Depends(auth_sync)):
+    """Poll an async scan by id. Returns the stored record, with a ``status`` of
+    ``pending`` / ``done`` / ``error``, in the shape this route's version speaks
+    — the record itself is held canonically, so either version can poll any job
+    whatever it was submitted under (the webhook, having no route, instead
+    follows the job's own version) — or
     ``404`` once it has expired, was never created, or belongs to another caller.
     Requires ``WORKER_RESULT_TTL > 0``; with the store disabled this is always 404.
     """
@@ -412,4 +428,4 @@ def job_status(job_id: str, username: str = Depends(auth_sync)):
     record = results.fetch(job_id, username)
     if record is None:
         raise HTTPException(404, detail="job not found")
-    return record
+    return wire.serialize(record, wire.of_path(request.url.path))

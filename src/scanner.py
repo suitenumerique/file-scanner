@@ -42,7 +42,7 @@ class ScannerError(Exception):
 
     Raised by :meth:`Scanner.scan` when the scan could not be *carried out*
     (engine unreachable, out of memory, hit a runtime limit). It is distinct
-    from a :class:`Verdict` of ``unscannable``, which is a permanent property of
+    from a :class:`Verdict` of ``partial``, which is a permanent property of
     the file itself.
     """
 
@@ -55,7 +55,7 @@ class Verdict:
     - ``malware``     — a detection; ``reason`` is the signature/rule name.
     - ``flagged``     — a content-policy hit on a *scored* axis (e.g. nsfw) whose
       ``score`` is at/above the backend's threshold; ``reason`` is a label.
-    - ``unscannable`` — could NOT be fully scanned (encrypted, undecodable,
+    - ``partial``     — could NOT be fully scanned (encrypted, undecodable,
       over a limit). Permanent for this file, so never retried and never clean.
       ``reason`` is a short tag (e.g. ``PASSWORD-PROTECTED``, ``UNSCANNABLE``).
 
@@ -83,8 +83,8 @@ def malware(signature: str | None) -> Verdict:
     return Verdict("malware", signature)
 
 
-def unscannable(tag: str) -> Verdict:
-    return Verdict("unscannable", tag)
+def partial(tag: str) -> Verdict:
+    return Verdict("partial", tag)
 
 
 @dataclass
@@ -100,10 +100,16 @@ class Scanner(ABC):
     """A pluggable file scanner. Implementations live in ``scanners/``.
 
     ``category`` is the axis this scanner feeds (``malware``, ``nsfw``, …) — it
-    determines which top-level response key the scanner's result aggregates into.
+    determines which ``verdicts`` entry the scanner's result aggregates into.
     ``scored`` is True for probabilistic axes that report a numeric ``score``
     (reduced by ``max`` across the category); False for discrete detection axes
     like malware (reduced by ``any``).
+
+    **No shipped backend sets ``scored``**: clamav, exav and jcop all feed the
+    discrete ``malware`` axis. The scored path is complete and tested (see
+    ``docs/categories.md``), but every scored branch below is unreachable until
+    a scored backend lands — do not read it as dead code, and do not assume it
+    is exercised in production either.
     """
 
     category: str = "malware"
@@ -133,10 +139,10 @@ class Scanner(ABC):
 class ScannerResult:
     """One scanner's outcome for a file.
 
-    ``kind`` is one of {clean, malware, flagged, unscannable, error}; ``error`` is a
+    ``kind`` is one of {clean, malware, flagged, partial, error}; ``error`` is a
     transient failure to *carry out* the scan (from :class:`ScannerError`).
     ``reason`` carries the signature (malware), the label (flagged), the tag
-    (unscannable), or the message (error). ``category`` is the axis the scanner
+    (partial), or the message (error). ``category`` is the axis the scanner
     feeds and ``score`` the raw confidence for a scored axis (else ``None``).
     ``scored`` mirrors the scanner's flag so the report can pick the right
     per-category reduction. ``time`` is the scan duration in seconds.
@@ -157,8 +163,8 @@ class ScannerResult:
     @property
     def incomplete(self) -> bool:
         """The scanner did not examine the whole file — transiently (``error``)
-        or as a property of the file (``unscannable``)."""
-        return self.kind in ("error", "unscannable")
+        or as a property of the file (``partial``)."""
+        return self.kind in ("error", "partial")
 
     def as_dict(self) -> dict:
         d = {
@@ -179,14 +185,45 @@ class ScannerResult:
 
 
 @dataclass
+class CategoryVerdict:
+    """One category's outcome — the axis-level counterpart of a
+    :class:`ScannerResult`, carrying the same ``kind`` vocabulary so the same
+    five words run from a backend's reply to the caller's response.
+
+    ``reason`` is the signature (malware), the label (flagged), the tag
+    (partial) or the message (error). ``score`` is the reduced confidence of a
+    scored axis (``None`` on a discrete one, or when nothing scored) and
+    ``location`` the matched member's inner path when a backend reported one.
+    """
+
+    kind: str
+    reason: str | None = None
+    score: float | None = None
+    location: str | None = None
+
+    def as_dict(self) -> dict:
+        d = {"kind": self.kind}
+        if self.score is not None:
+            d["score"] = round(self.score, 4)
+        if self.reason is not None:
+            d["reason"] = self.reason
+        if self.location is not None:
+            d["location"] = self.location
+        return d
+
+
+@dataclass
 class ScanReport:
     """The combined outcome of running several scanners on one file.
 
-    The response is per-category aggregates (:meth:`categories`) plus the
-    per-scanner breakdown. A discrete axis (malware) reduces by ``any`` to a
-    bool; a scored axis (nsfw) reduces by ``max`` to a float, or ``None`` when
-    no scanner in that axis produced a score (didn't run / errored) — never
-    ``0.0``, which would falsely assert "definitely not".
+    The response is :meth:`verdicts` — the per-category answer in the
+    scanners' own vocabulary (``clean`` / ``malware`` / ``flagged`` /
+    ``partial`` / ``error``) — plus the per-scanner breakdown. An axis used to
+    be reported as a scalar in its native type as well (bool, float, or
+    ``None``); that form could not say *why* an answer was missing, so it
+    needed an ``error_kind`` beside it to tell "the engines failed" from "this
+    file cannot be read". The verdict says it outright, and is the only form
+    on the wire.
     """
 
     results: list[ScannerResult] = field(default_factory=list)
@@ -197,9 +234,24 @@ class ScanReport:
         return any(r.kind == "malware" for r in self.results)
 
     @property
+    def detected(self) -> bool:
+        """Any scanner found something — advisory ones included, on any axis."""
+        return any(r.kind in ("malware", "flagged") for r in self.results)
+
+    @property
     def all_errored(self) -> bool:
-        """Every deciding scanner failed transiently — nothing that could
-        assert a verdict scanned the file, whatever the advisory ones did."""
+        """Nothing usable came out of this scan: every deciding scanner failed
+        transiently, and no scanner detected anything.
+
+        A detection stands on its own, whichever scanner made it. It is a
+        positive fact about the file that a retry cannot improve on, and
+        throwing it away to retry would answer "scan unavailable" for a file
+        we already know is infected. The converse does not hold: an advisory
+        ``clean`` next to a deciding failure asserts nothing about the file,
+        so it never rescues the job.
+        """
+        if self.detected:
+            return False
         deciding = [
             r
             for results in self._by_category().values()
@@ -221,69 +273,79 @@ class ScanReport:
         "cannot block"."""
         return [r for r in results if not r.advisory] or results
 
-    @property
-    def unscannable(self) -> list[ScannerResult]:
-        """Deciding results whose scanner could not examine the whole file for
-        a reason that is a property of the file (never a transient error)."""
-        blaming_the_file = []
-        for results in self._by_category().values():
-            detected = any(r.kind in ("malware", "flagged") for r in results)
-            if detected:
-                continue
-            blaming_the_file += [
-                r for r in self._deciding(results) if r.kind == "unscannable"
-            ]
-        return blaming_the_file
+    def verdicts(self) -> dict[str, CategoryVerdict]:
+        """Per-category verdict, in first-seen order — the axis-level answer,
+        in the same five words a scanner reports.
 
-    def categories(self) -> dict:
-        """Per-category aggregate, in first-seen order.
+        Two rules decide it, and the loop below is only their implementation:
 
-        A detection wins outright, from any scanner. Otherwise the deciding
-        scanners (:meth:`_deciding`) must all have examined the whole file for
-        the axis to be asserted: a discrete axis (malware) → ``False`` then,
-        ``None`` when one of them did not complete (a transient error, or a
-        file it cannot read); a scored axis → ``max`` of the available scores,
-        ``None`` likewise.
+        **Precedence** ``malware`` (or ``flagged``) > ``error`` > ``partial`` >
+        ``clean``. **Scope** a detection counts from *any* scanner, advisory
+        included; not having read the whole file (``error`` / ``partial``)
+        counts only from the deciding ones (:meth:`_deciding`).
+
+        The scope asymmetry is deliberate: a detection is a fact about the file
+        that no other engine can soften, while an advisory engine's failure
+        says nothing at all. Within the incomplete ones, ``error`` outranks
+        ``partial`` because it is the retryable one — a retry that comes back
+        ``partial`` blocks the file then, whereas leading with ``partial``
+        would block it permanently on what may be a passing outage. ``clean``
+        is last: it is the only word requiring every deciding engine to have
+        read the file in full.
         """
-        aggregates: dict = {}
+        verdicts: dict[str, CategoryVerdict] = {}
         for category, results in self._by_category().items():
-            deciding = self._deciding(results)
-            incomplete = any(r.incomplete for r in deciding)
-            if any(r.scored for r in results):
+            # The scanners that decide this axis and did not read the whole
+            # file — empty means everything that counts examined it, so the
+            # axis may be asserted. ``blocker`` is the one to report: an
+            # ``error`` if any, else a ``partial`` (the precedence above).
+            unfinished = [r for r in self._deciding(results) if r.incomplete]
+            blocker = next(
+                (r for r in unfinished if r.kind == "error"),
+                unfinished[0] if unfinished else None,
+            )
+            # Scored axis (nsfw and the like); no shipped backend uses one.
+            # ``all``, not ``any``: a mixed category would otherwise send a
+            # discrete ``malware`` down a branch that only reads ``flagged``.
+            if results and all(r.scored for r in results):
                 scores = [r.score for r in results if r.score is not None]
-                if any(r.kind == "flagged" for r in results):
-                    aggregates[category] = max(scores)
-                elif incomplete:
-                    aggregates[category] = None
+                hits = [r for r in results if r.kind == "flagged"]
+                if hits:
+                    top = max(hits, key=lambda r: r.score or 0.0)
+                    # ``scores`` is empty with a threshold-only backend:
+                    # fall back to the top hit's own. None, not 0.0 — the
+                    # axis is flagged either way.
+                    verdict = CategoryVerdict(
+                        "flagged", top.reason, max(scores, default=top.score)
+                    )
+                elif blocker:
+                    verdict = CategoryVerdict(blocker.kind, blocker.reason)
                 else:
-                    aggregates[category] = max(scores) if scores else None
-            elif any(r.kind == "malware" for r in results):
-                aggregates[category] = True
-            elif incomplete:
-                aggregates[category] = None
+                    # Highest score seen, or none at all when nothing
+                    # scored — never 0.0, which reads as "definitely not".
+                    verdict = CategoryVerdict(
+                        "clean", score=max(scores) if scores else None
+                    )
+            elif detections := [r for r in results if r.kind in ("malware", "flagged")]:
+                # Each detection keeps its own word: ``flagged`` is a
+                # content-policy hit, not a virus. ``malware`` wins when both
+                # are present.
+                top = next(
+                    (r for r in detections if r.kind == "malware"), detections[0]
+                )
+                verdict = CategoryVerdict(top.kind, top.reason, location=top.location)
+            elif blocker:
+                verdict = CategoryVerdict(blocker.kind, blocker.reason)
             else:
-                aggregates[category] = False
-        return aggregates
+                verdict = CategoryVerdict("clean")
+            verdicts[category] = verdict
+        return verdicts
 
     def as_dict(self) -> dict:
-        report = {
-            **self.categories(),
+        return {
+            "verdicts": {c: v.as_dict() for c, v in self.verdicts().items()},
             "scanners": [r.as_dict() for r in self.results],
         }
-        unscannable = self.unscannable
-        deciding_error = any(
-            r.kind == "error"
-            for results in self._by_category().values()
-            for r in self._deciding(results)
-        )
-        if unscannable and not deciding_error:
-            # The file itself is why a category is unknown: say so the way a
-            # pre-scan failure does, so a caller neither trusts it nor retries.
-            report["error_kind"] = "file"
-            report["error"] = "not fully scanned: " + ", ".join(
-                f"{r.scanner} ({r.reason})" for r in unscannable
-            )
-        return report
 
 
 # --- Registry & orchestration ---
@@ -458,7 +520,7 @@ def validate_registry() -> None:
                     f"but is listed under {cat!r} in DEFAULT_SCANNERS"
                 )
         # A category is one axis, so its engines must agree on scored-ness —
-        # otherwise ScanReport.categories() can't pick a single reduction.
+        # otherwise ScanReport.verdicts() can't pick a single reduction.
         if len({get_scanner(name).scored for name in names}) > 1:
             raise RuntimeError(
                 f"DEFAULT_SCANNERS[{cat!r}] mixes scored and unscored scanners; "

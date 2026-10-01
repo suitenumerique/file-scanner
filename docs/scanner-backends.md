@@ -1,12 +1,14 @@
 # Scanner backends
 
 The scanning engine is pluggable. The app and worker only ever see a normalized
-`Verdict` (`clean` / `malware` / `flagged` / `unscannable`) from the `Scanner`
+`Verdict` (`clean` / `malware` / `flagged` / `partial`) from the `Scanner`
 interface in `scanner.py`; concrete backends live in `scanners/` and are
 registered by public name in `scanner._BUILDERS`. Each backend declares the
 **category** (axis) it feeds. A request selects work by category and/or scanner
 (`?categories=malware` and/or `?scanners=clamav,jcop`); otherwise
-`DEFAULT_CATEGORIES` is used — see [categories.md](categories.md). Selected
+`DEFAULT_CATEGORIES` is used — see [categories.md](categories.md). Every
+backend reply is normalized into the same five words; the full mapping from each
+engine's wire vocabulary is in [glossary.md](glossary.md). Selected
 scanners run **in parallel** (each on its own file handle); within a category
 their results are combined **strictly** — clean only if every deciding scanner scanned it
 in full and found nothing.
@@ -57,14 +59,16 @@ It has its **own** pool, `EXAV_HOSTS` (required, same `host:port,…` format,
 balanced per scan), so `clamav` and `exav` run side by side against separate
 daemons; `PING`/`VERSION` use the standard clamd path. Its defining property: it
 **never reports a skipped file clean** — where ClamAV silently returns `OK` (e.g.
-a file over ~2 GB), exav returns an `unscannable` verdict with a structured tag
+a file over ~2 GB), exav returns a `partial` verdict with a structured tag
 (see [Extended verdicts](#extended-verdicts)). Its streaming matcher runs in
 constant memory, so the file size cap is a configured limit, not a memory
 one. exav manages its own database reloads, so it reports no
 signature-freshness metric.
 
-> exav is young (0.0.x). Run it next to clamav and compare verdicts before
-> relying on it alone.
+> exav can replace clamav outright (`DEFAULT_SCANNERS={"malware": ["exav"]}`)
+> or run next to it. While it is young (0.0.x), running both for a while and
+> comparing the verdicts in `scanners[]` is a cheap check before dropping
+> clamav.
 
 ## jcop
 
@@ -89,9 +93,15 @@ For a "couldn't fully scan" outcome exav returns `{"status":"PARTIAL",
 | `UNSCANNABLE` | A container was recognised but couldn't be decoded. |
 | `PASSWORD-PROTECTED` | An encrypted member — actionable (re-scan with a password). |
 
+These tags are the **shared** vocabulary, not exav's alone: the clamav and jcop
+backends synthesize the same words for the cases they can recognise, so a caller
+never has to know which engine ran to group its outcomes. `PASSWORD-PROTECTED`
+stays exav-only because the other two cannot tell that case apart — they report
+`UNSCANNABLE`. See [glossary.md](glossary.md#reason-tags).
+
 Because exav states the verdict class in JSON, the backend does no tag-vs-error
 guessing: `PARTIAL` is a permanent file property (never clean, never malware),
 while `{"status":"ERROR","reason":…}` is exav itself failing — a transient
 failure that is retried. (The clamav backend, on the legacy string protocol,
 still infers this —
-an `ERROR` reply becomes `unscannable` unless it looks like a transient OS error.)
+an `ERROR` reply becomes `partial` unless it looks like a transient OS error.)

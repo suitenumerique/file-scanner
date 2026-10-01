@@ -62,7 +62,7 @@ services:
     # MAX_URL_SIZE streams and scans. MaxScanTime (ms, default 120 s) is
     # raised for a file that size, and AlertExceedsMax makes clamd report
     # any limit it hits instead of answering OK on a partial scan; the
-    # backend maps that report to an unscannable verdict.
+    # backend maps that report to a partial verdict.
     environment:
       CLAMD_CONF_StreamMaxLength: *max_url_size
       CLAMD_CONF_MaxFileSize: *max_url_size

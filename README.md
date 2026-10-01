@@ -59,7 +59,7 @@ TOKEN=$(docker compose exec -T app python deploy/scripts/mint-token.py "$DEV_PRI
 
 curl -sf -H "Authorization: Bearer $TOKEN" -F "file=@/tmp/eicar.txt" \
      http://localhost:8090/api/v1.0/scan
-# {"malware": true,
+# {"verdicts": {"malware": {"kind": "malware", "reason": "Eicar-Test-Signature"}},
 #  "scanners": [{"scanner": "clamav", "category": "malware", "kind": "malware",
 #                "reason": "Eicar-Test-Signature", "time": 0.003}]}
 ```
@@ -162,6 +162,7 @@ docs/              reference documentation (see below)
 | Document | Contents |
 | --- | --- |
 | [docs/architecture.md](docs/architecture.md) | Components, request flows, statelessness. |
+| [docs/glossary.md](docs/glossary.md) | The four stacked vocabularies, and how each translates the one below. |
 | [docs/categories.md](docs/categories.md) | The category model: request grammar, multi-axis verdicts, config. |
 | [docs/api.md](docs/api.md) | Full endpoint reference and payload schemas. |
 | [docs/scanner-backends.md](docs/scanner-backends.md) | clamav / exav / jcop and the extended verdicts. |

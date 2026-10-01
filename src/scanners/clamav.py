@@ -8,7 +8,7 @@ exav backend (``exav.py``) subclasses this one.
 
 An ``ERROR`` reply means the file was not fully scanned, so it is never clean: a
 transient infrastructure reason (out of memory, disk full, a runtime limit)
-retries, anything else is an ``unscannable`` file. The exav backend extends this
+retries, anything else is a ``partial`` verdict. The exav backend extends this
 via :meth:`ClamavScanner._error_verdict` to recognise its structured error tags.
 """
 
@@ -25,7 +25,7 @@ from scanner import (
     VersionInfo,
     clean,
     malware,
-    unscannable,
+    partial,
 )
 
 settings = get_settings()
@@ -142,19 +142,19 @@ class ClamavScanner(Scanner):
             # (MaxScanTime, MaxFileSize, MaxScanSize, MaxRecursion, ...) as a
             # FOUND named after the limit. That is a file it could not fully
             # examine, not a detection.
-            return unscannable("LIMITS-EXCEEDED")
+            return partial("LIMITS-EXCEEDED")
         # FOUND (or any other non-OK verdict) → a detection.
         return malware(reason)
 
     def _error_verdict(self, reason) -> Verdict:
         """Map a clamd ``ERROR`` reply to a verdict. The file was not fully
         scanned, so it is never clean: a transient infrastructure reason (OOM,
-        disk, runtime limit) retries; anything else is an unscannable file.
+        disk, runtime limit) retries; anything else is a partial verdict.
         Subclasses override to recognise structured error tags (see exav).
         """
         if _is_transient(reason):
             raise ScannerError(f"scan error: {reason}")
-        return unscannable("UNSCANNABLE")
+        return partial("UNSCANNABLE")
 
     def version(self) -> VersionInfo:
         try:

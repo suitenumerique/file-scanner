@@ -1,7 +1,13 @@
-"""Async /api/v1.0/scan-async endpoint and the dramatiq worker task's
-verdict/error reporting."""
+"""Async scan-async endpoint and the dramatiq worker task's verdict/error
+reporting.
+
+The webhook is a callback with no route of its own, so the shape of its body
+follows the API version the job was *submitted* under. These cases run the
+current version (v2) unless they say otherwise.
+"""
 
 import base64
+import inspect
 import os
 from unittest import mock
 
@@ -11,10 +17,12 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 import encryption
 import tasks
+import wire
 from app import settings
 from tasks import scan_task
 
-ASYNC_URL = "/api/v1.0/scan-async"
+ASYNC_URL = "/api/v2.0/scan-async"
+ASYNC_URL_V1 = "/api/v1.0/scan-async"
 
 
 def test_tasks_use_dedicated_queues():
@@ -217,6 +225,7 @@ def run_task(clamav):
         scanners=("clamav",),
         encryption_params=None,
         scanned=None,
+        wire_version=wire.V2,
     ):
         sent = []
 
@@ -262,6 +271,7 @@ def run_task(clamav):
                 None,
                 "",
                 encryption_params,
+                wire_version,
             )
         return sent
 
@@ -270,7 +280,7 @@ def run_task(clamav):
 
 def test_task_clean(run_task):
     (sent,) = run_task(verdict=("OK", None))
-    assert sent["malware"] is False
+    assert sent["verdicts"]["malware"]["kind"] == "clean"
     assert sent["scanners"][0]["kind"] == "clean"
     assert sent["status"] == "done"
     assert "error_kind" not in sent
@@ -278,21 +288,22 @@ def test_task_clean(run_task):
 
 def test_task_infected(run_task):
     (sent,) = run_task(verdict=("FOUND", "Eicar-Test-Signature"))
-    assert sent["malware"] is True
+    assert sent["verdicts"]["malware"]["kind"] == "malware"
     assert sent["scanners"][0]["reason"] == "Eicar-Test-Signature"
 
 
-def test_task_unscannable(run_task):
+def test_task_partial(run_task):
     # clamav backend flattens an ERROR to UNSCANNABLE (exav preserves the tag).
-    # The file was not examined in full: the axis is unknown, and the report
-    # blames the file so the caller blocks it without retrying.
+    # The file was not examined in full: the verdict says so outright, so the
+    # caller blocks it without retrying.
     (sent,) = run_task(verdict=("ERROR", "Encrypted data"))
     assert sent["status"] == "done"
-    assert sent["malware"] is None
-    assert sent["scanners"][0]["kind"] == "unscannable"
+    assert sent["verdicts"]["malware"] == {
+        "kind": "partial",
+        "reason": "UNSCANNABLE",
+    }
+    assert sent["scanners"][0]["kind"] == "partial"
     assert sent["scanners"][0]["reason"] == "UNSCANNABLE"
-    assert sent["error_kind"] == "file"
-    assert sent["error"] == "not fully scanned: clamav (UNSCANNABLE)"
 
 
 def test_task_all_scanners_error_is_transient(run_task):
@@ -369,7 +380,7 @@ def test_task_unbounded_body_capped_as_file(run_task, monkeypatch):
 
 def test_task_malformed_content_length_ignored(run_task):
     (sent,) = run_task(content_length="not-a-number")
-    assert sent["malware"] is False
+    assert sent["verdicts"]["malware"]["kind"] == "clean"
     assert "error_kind" not in sent
 
 
@@ -469,7 +480,7 @@ def test_task_decrypts_before_scan(run_task):
         encryption_params=_params(plaintext),
         scanned=scanned,
     )
-    assert sent["malware"] is False
+    assert sent["verdicts"]["malware"]["kind"] == "clean"
     assert scanned == [plaintext]  # the scanner saw plaintext, not ciphertext
 
 
@@ -482,7 +493,7 @@ def test_task_decrypts_multi_chunk_with_short_tail(run_task):
         scanned=scanned,
     )
     assert scanned == [plaintext]
-    assert sent["malware"] is False
+    assert sent["verdicts"]["malware"]["kind"] == "clean"
 
 
 def test_task_decrypt_wire_chunking_is_irrelevant(run_task):
@@ -494,7 +505,7 @@ def test_task_decrypt_wire_chunking_is_irrelevant(run_task):
         chunks=pieces, encryption_params=_params(plaintext), scanned=scanned
     )
     assert scanned == [plaintext]
-    assert sent["malware"] is False
+    assert sent["verdicts"]["malware"]["kind"] == "clean"
 
 
 def test_task_infected_plaintext_is_reported(run_task):
@@ -503,7 +514,7 @@ def test_task_infected_plaintext_is_reported(run_task):
         chunks=[_encrypt(b"whatever")],
         encryption_params=_params(b"whatever"),
     )
-    assert sent["malware"] is True
+    assert sent["verdicts"]["malware"]["kind"] == "malware"
 
 
 def test_task_wrong_key_is_file_error(run_task):
@@ -552,3 +563,97 @@ def test_task_unsupported_scheme_is_file_error(run_task):
     (sent,) = run_task(chunks=[_encrypt(plaintext)], encryption_params=params)
     assert sent["error_kind"] == "file"
     assert "scheme" in sent["error"]
+
+
+# --- the version travels with the job ---------------------------------------
+
+
+def _delivered(result, version):
+    """Run ``_finalize`` on a terminal ``result``; returns (webhook body, stored
+    record). This is the hand-off the version rides through — the download and
+    scan before it are covered elsewhere."""
+    sent, stored = [], []
+    with (
+        mock.patch.object(
+            tasks.deliver_webhook,
+            "send",
+            side_effect=lambda _url, body: sent.append(body),
+        ),
+        mock.patch.object(
+            tasks.results,
+            "record",
+            side_effect=lambda _j, _o, rec: stored.append(dict(rec)),
+        ),
+    ):
+        tasks._finalize(result, "http://cb/av", "caller", version)
+    return sent[0], stored[0]
+
+
+def _terminal(kind, **rest):
+    return {
+        "job_id": "j1",
+        "status": "done",
+        "verdicts": {"malware": {"kind": kind, **rest}},
+        "scanners": [{"scanner": "clamav", "category": "malware", "kind": kind}],
+    }
+
+
+def test_a_v1_job_is_called_back_in_the_v1_shape():
+    """The callback has no route to ask with, so the version the job was
+    submitted under is the only thing that can decide its shape."""
+    body, _ = _delivered(_terminal("malware", reason="Eicar-Test-Signature"), wire.V1)
+    assert body["malware"] is True
+    assert "verdicts" not in body
+    assert body["api_version"] == wire.V1
+
+
+def test_a_v2_job_is_called_back_with_its_verdicts():
+    body, _ = _delivered(_terminal("partial", reason="UNSCANNABLE"), wire.V2)
+    assert body["verdicts"]["malware"]["kind"] == "partial"
+    assert body["api_version"] == wire.V2
+
+
+def test_a_v1_job_gets_the_error_kind_that_qualifies_a_null():
+    body, _ = _delivered(_terminal("partial", reason="UNSCANNABLE"), wire.V1)
+    assert body["malware"] is None
+    assert body["error_kind"] == "file"
+
+
+def test_the_record_is_stored_canonically_whatever_the_job_version():
+    """Either version can poll any job, so the stored record cannot be the
+    caller's shape — the poll route downgrades it on the way out."""
+    _, record = _delivered(_terminal("malware", reason="Eicar"), wire.V1)
+    assert record["verdicts"]["malware"]["kind"] == "malware"
+    assert "api_version" not in record
+
+
+def test_the_default_shape_is_v1_for_a_message_queued_before_this_version():
+    """A job enqueued by the previous worker carries no version argument at all.
+    It was submitted by a v1 caller by definition — nothing else existed — so
+    the default must answer it in v1, not in a shape it cannot read. This is a
+    rollout guarantee, not a preference: it is what keeps the jobs in flight
+    during the deploy from coming back unreadable."""
+    default = inspect.signature(scan_task.fn).parameters["wire_version"].default
+    assert default == wire.V1
+
+
+def _submitted_version(auth_client, url):
+    """The version handed to the task by a submit on ``url`` (SSRF guard stubbed
+    — the point here is the path, not the destination)."""
+    import app
+
+    body = {"url": "http://src/f.bin", "webhook_url": "http://cb/av"}
+    with (
+        mock.patch.object(app, "assert_scannable"),
+        mock.patch.object(scan_task, "send") as send,
+    ):
+        r = auth_client.post(url, json=body)
+    assert r.status_code == 202, r.text
+    return send.call_args.args[-1]
+
+
+def test_the_submitted_version_is_carried_into_the_message(auth_client):
+    """The endpoint is what reads the path; the task only obeys it. This is the
+    hand-off that lets a callback know its own shape later."""
+    assert _submitted_version(auth_client, ASYNC_URL_V1) == wire.V1
+    assert _submitted_version(auth_client, ASYNC_URL) == wire.V2
