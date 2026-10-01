@@ -370,7 +370,12 @@ def scan_task(
     except SSRFValidationError as exc:
         logger.error(f"Job {job_id} blocked by scan policy: {exc}")
         _report_error(
-            result, webhook_url, api_client, wire_version, "file", f"ssrf_blocked: {exc}"
+            result,
+            webhook_url,
+            api_client,
+            wire_version,
+            "file",
+            f"ssrf_blocked: {exc}",
         )
         return
 
