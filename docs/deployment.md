@@ -110,9 +110,10 @@ secrets** — the `*.defaults` keys are throwaway.
 | `PROMETHEUS_API_KEY` | *(empty)* | If set, `/metrics` requires `Authorization: Bearer <key>`. Empty = open (isolate it at the network layer). |
 | `DEFAULT_SCANNERS` | `{"malware": ["clamav"]}` | JSON `category → [engines]` map: the categories that exist and which engines compose each. |
 | `DEFAULT_CATEGORIES` | `malware` | Comma-separated categories run when a request names neither `categories` nor `scanners`. Must be keys of `DEFAULT_SCANNERS`. |
+| `ADVISORY_SCANNERS` | *(empty)* | Engines whose detections count but whose failure to examine a file does not, when a deciding engine of the category did (see [categories.md](categories.md#advisory-scanners)). E.g. `clamav` next to exav. |
 | `CLAMAV_SOCKET` | *(empty)* | Unix socket path; takes precedence over the host list. |
 | `CLAMAV_HOSTS` | `localhost:3310` | `host:port,…` clamav daemon pool; a single entry is one daemon, several enable client-side balancing. |
-| `EXAV_HOSTS` | *(empty)* | `host:port,…` pool for the exav scanner (required to use `exav`). |
+| `EXAV_HOSTS` | *(empty)* | `host:port,…` pool for the exav scanner (required to use `exav`). See [Running exav](#running-exav). |
 | `CLAMAV_TXT_URI` | `current.cvd.clamav.net` | DNS TXT record for the latest signature version (freshness gauge). |
 | `JCOP_BASE_URL` / `JCOP_API_KEY` | *(empty)* | jcop backend endpoint + token (required to use `jcop`). |
 | `JCOP_RESULT_TIMEOUT` / `JCOP_SUBMIT_TIMEOUT` / `JCOP_POLL_INTERVAL` | `30` / `600` / `5` | jcop poll timeout / total budget / poll interval (s). |
@@ -126,7 +127,7 @@ secrets** — the `*.defaults` keys are throwaway.
 | `WORKER_DASHBOARD_FORWARDED_IP_HEADER` | *(empty)* | If set (e.g. `X-Forwarded-For`), the allowlist trusts this header's leftmost IP instead of the direct peer. Only behind a proxy that overwrites it. |
 | `DOWNLOAD_DIR` | `/tmp/file-scanner` | Worker-local scratch dir for the async download (not shared with the scanner). |
 | `MAX_UPLOAD_SIZE` | `104857600` (100 MiB) | Max size for a direct `/api/v1.0/scan` upload. |
-| `MAX_URL_SIZE` | `2147483645` | Max size for an async download — the most clamav scans in one file (see [clamd size limits](#clamd-size-limits)). |
+| `MAX_URL_SIZE` | `2147483645` | Max size of a file fetched for an async scan — the file the scanners see (the plaintext of a client-encrypted source; its wire bytes get the chunking overhead on top). The default is the most clamav scans in one file (see [clamd size limits](#clamd-size-limits)). |
 | `URL_DOWNLOAD_TIMEOUT` | `30` | Per-read timeout (s) on the async download. |
 | `DOWNLOAD_MAX_SECONDS` | `300` | Total wall-clock budget (s) for an async download. |
 | `ENCRYPTION_MIN_CHUNK_SIZE` | `4096` (4 KiB) | Floor on a client-encrypted source's `chunk_size` (guards a chunk-count CPU cost). |
@@ -135,6 +136,45 @@ secrets** — the `*.defaults` keys are throwaway.
 | `WORKER_RESULT_TTL` | `0` | TTL (s) for an async job's stored result, enabling `GET /api/v1.0/jobs/{job_id}` (record kept in the broker's Redis). `0` = disabled (fully stateless, webhook-only, `webhook_url` mandatory); `> 0` makes `webhook_url` optional. |
 | `ALLOWED_URL_HOSTS` | *(empty)* | If set, **only** these hostnames may be submitted (positive allowlist). |
 | `SSRF_ALLOWED_HOSTS` | *(empty)* | Hosts trusted to resolve to a private/internal address (SSRF bypass). |
+
+## API versions and upgrading
+
+Two versions are served side by side, and the path is the contract:
+
+| | `/api/v1.0/` | `/api/v2.0/` |
+| --- | --- | --- |
+| scan result | flat per-category scalars, `error_kind`, `error` | [`verdicts`](categories.md), one per category — the words are in [glossary.md](glossary.md#3-the-five-words) |
+| status | frozen — no new shape lands here | current |
+
+Both are serialisations of the **same** computation, so a file cannot be judged
+one way on one route and another way on the other; the downgrade lives in
+[`src/wire.py`](../src/wire.py) and nowhere else. **Deploying this version
+therefore breaks no caller and needs no coordination**: a v1 caller keeps its
+endpoint and its shape, and moves when it chooses by changing the version in the
+path it posts to.
+
+Two operational notes, both easy to miss.
+
+**The JWT is bound to the path it was minted for** (`htu`). A caller moving to
+v2 must sign `/api/v2.0/scan-async`, not just post to it — otherwise it gets a
+401, not a shape problem.
+
+**A webhook has no route of its own.** Its body is shaped by the version the job
+was *submitted* under, and stamped with it (`"api_version": "v2.0"`), because a
+scan outlives a deploy: a job submitted before a caller upgrades is delivered
+after it. A caller should read that stamp rather than sniff for keys, and on a
+version it does not read, acknowledge the callback with a 200 and re-submit the
+scan — refusing delivery only makes the scanner re-send the same body until it
+dead-letters.
+
+**The one thing that does break: the `verdict` label on
+`filescanner_scans_total` renamed `unscannable` to `partial`**, matching the
+word the verdict now uses. This is not covered by the API versioning — metrics
+have no version. Any dashboard panel or alert rule selecting
+`verdict="unscannable"` reports zero from the moment this version starts,
+including, if you have one, the alert that tells you files are going unscanned.
+Update those rules before deploying: they are out of tree, so nothing here will
+fail to warn you.
 
 ## Running locally
 
@@ -150,11 +190,14 @@ make test        # run the test suite in the app container (against clamav)
 Wait for `clamav` to finish loading its database before scanning
 (`docker compose logs -f clamav`).
 
-To also exercise the **exav** backend, bring up the opt-in `exav` service (it
-shares clamav's signature volume) before running the suite:
+To also exercise the **exav** backend, bring up the opt-in `exav` service
+before running the suite. It compiles the signature files the `clamav`
+service keeps fresh (a few minutes and ~3.6 GB of RAM on first start); see
+`deploy/env/exav.defaults` to load a prebuilt database instead
+([Running exav](#running-exav)):
 
 ```bash
-docker compose --profile exav up -d exav   # needs an exav image (see the compose comment)
+docker compose --profile exav up -d exav
 make test                                   # the exav-marked tests now run (they skip otherwise)
 ```
 
@@ -175,6 +218,91 @@ Run the tests from the repository root:
 ```bash
 APP_CONFIG=config.CiConfig uv run pytest
 ```
+
+## Running exav
+
+[exav](https://exav.org) is the second malware engine (see
+[scanner-backends.md](scanner-backends.md#exav)). The daemon speaks the clamd
+protocol on 3310 and takes the same `host:port,…` pool, `EXAV_HOSTS`. Whether
+it runs next to clamav or instead of it is configuration: it only scans when
+named, so list it in `DEFAULT_SCANNERS` — `{"malware": ["clamav", "exav"]}`
+to run both on every scan, `{"malware": ["exav"]}` to replace clamav — or
+select it per request with `scanners`.
+
+### 1. Signatures: exav brings none
+
+exav reads ClamAV's signature formats but ships no database (the official
+one is GPL, exav is MIT) and **has no updater of its own**: it does not speak
+freshclam's protocol, and ClamAV's CDN refuses clients that aren't
+`freshclam`/`cvdupdate`. So the signatures come from an updater you run:
+
+```sh
+# Option A — freshclam (ships with ClamAV; what the clamav container runs)
+freshclam                       # → /var/lib/clamav/{main,daily,bytecode}.cvd
+
+# Option B — cvdupdate (Cisco's Python updater)
+pip install cvdupdate && cvd update   # → ~/.cvdupdate/database/
+```
+
+Any third-party feed (vendor add-on sets, YARA rules) goes in the same
+directory — exav loads it recursively by extension, so a nested layout from
+another updater is fine. Keep the updater on its usual schedule; nothing
+about updating changes.
+
+### 2. Compile a prebuilt database
+
+Compiling the signature set costs ~3.6 GB of RAM in a transient spike and a
+few minutes; loading a prebuilt `.exavdb` costs about its size, in seconds.
+Build once, on a host that has the memory, wherever the updater runs:
+
+```sh
+exav -d /var/lib/clamav --build-db exav.exavdb        # https://www.exav.org/guides/prebuilt-database/
+exav -d /var/lib/clamav --build-db exav.exavdb --build-shard-bytes 1G   # memory-constrained builder
+```
+
+Rebuild after each update (a cron right after `freshclam`/`cvd update`) and
+publish the file on plain HTTPS, under a stable URL, from a server that
+answers `HEAD` with an `ETag` or `Last-Modified` (any static bucket does).
+Version the name or not — the daemon only cares that the validator changes.
+
+### 3. Run the daemon
+
+```
+EXAV_DB_URL=https://static.example.org/exav.exavdb   # the file from step 2
+EXAV_UPDATE_INTERVAL_SECS=300   # HEAD on the ETag; a changed file is fetched, checked and swapped in live
+EXAV_MAX_SPILL_BYTES=2200M      # temp space per streamed file — above MAX_URL_SIZE, like clamd's StreamMaxLength
+EXAV_MAX_SCAN_SECS=900          # wall clock per scan (default 120 s): a 2 GiB stream takes minutes
+```
+
+Every exav flag is also `EXAV_<FLAG>`. The image (`ghcr.io/sylvinus/exav`)
+is distroless, multi-arch and runs as 65532; `/exav --ping` is its health
+check, which only passes once the database is loaded. Give it a writable
+`/var/lib/exav` (the download lands there) and a `/tmp` sized for the spill.
+
+- **Kubernetes**: the chart bundles it — `exav.enabled=true`,
+  `exav.dbUrl=<step 2>`, and `exav` in `config.DEFAULT_SCANNERS`; no clamav
+  needed (`clamav.enabled=false` with `DEFAULT_SCANNERS={"malware":["exav"]}`
+  is a valid deployment).
+- **docker compose (dev)**: `docker compose --profile exav up -d exav`
+  skips steps 1–2 by compiling the files the `clamav` service's freshclam
+  keeps (read-only from its volume); `deploy/env/exav.defaults` says how to
+  point it at a prebuilt database instead.
+- **Anything else**: the daemon alone,
+  `docker run -d -p 3310:3310 -v exav:/var/lib/exav -e EXAV_DB_URL=… ghcr.io/sylvinus/exav:0.0.1`,
+  then `EXAV_HOSTS=<host>:3310` on the app and worker.
+
+### 4. Check
+
+```sh
+printf 'nPING\n' | nc <exav-host> 3310          # PONG once the database is loaded
+curl -sf -H "Authorization: Bearer $TOKEN" -F "file=@eicar.txt" \
+     "http://localhost:8090/api/v2.0/scan?scanners=exav"
+# → "verdicts": {"malware": {"kind": "malware", "reason": "Eicar-Test-Signature"}}
+```
+
+Every report — the sync response and the webhook payload — lists each
+engine's verdict under `scanners`, so a clamav/exav disagreement is visible
+before you rely on exav alone.
 
 ## Kubernetes (Helm)
 
@@ -290,7 +418,7 @@ CLAMD_CONF_AlertExceedsMax=yes
 `AlertExceedsMax` closes the remaining hole: any limit clamd still hits
 (time, size, recursion, ratio) is reported as
 `Heuristics.Limits.Exceeded.<Limit> FOUND` instead of `OK`, and the clamav
-backend maps that report to an `unscannable` verdict (`LIMITS-EXCEEDED`) —
+backend maps that report to a `partial` verdict (`LIMITS-EXCEEDED`) —
 the file is neither clean nor a detection, and stays blocked, exactly as
 exav reports the same outcome.
 

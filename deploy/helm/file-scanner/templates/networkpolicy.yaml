@@ -1,5 +1,5 @@
-{{- /* The bundled redis has no password and clamd no auth at all: only the
-   app and worker pods of this release may reach them. Needs a CNI that
+{{- /* The bundled redis has no password and clamd/exav no auth at all: only
+   the app and worker pods of this release may reach them. Needs a CNI that
    enforces NetworkPolicy. */}}
 {{- if .Values.networkPolicy.enabled }}
 {{- $callers := list "app" "worker" }}
@@ -50,6 +50,31 @@ spec:
         {{- end }}
       ports:
         - port: 3310
+          protocol: TCP
+{{- end }}
+{{- if .Values.exav.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "file-scanner.fullname" . }}-exav
+  labels:
+    {{- include "file-scanner.labels" . | nindent 4 }}
+    app.kubernetes.io/component: exav
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "file-scanner.selectorLabels" (dict "root" . "component" "exav") | nindent 6 }}
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        {{- range $callers }}
+        - podSelector:
+            matchLabels:
+              {{- include "file-scanner.selectorLabels" (dict "root" $ "component" .) | nindent 14 }}
+        {{- end }}
+      ports:
+        - port: {{ .Values.exav.port }}
           protocol: TCP
 {{- end }}
 {{- end }}

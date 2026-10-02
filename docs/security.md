@@ -53,8 +53,9 @@ A file is reported **clean only if it was actually scanned in full**:
 - A missing verdict (path not visible to the scanner) or an `ERROR` verdict is
   never reported as clean.
 - Extended verdicts (`LIMITS-EXCEEDED` / `UNSCANNABLE` / `PASSWORD-PROTECTED`,
-  and any future tag) are surfaced as `unscannable`, never as malware and never
-  as clean — see [scanner-backends.md](scanner-backends.md). Using
+  and any future tag) are surfaced as `partial`, never as malware and never
+  as clean — see [scanner-backends.md](scanner-backends.md) and
+  [glossary.md](glossary.md#reason-tags). Using
   [exav](https://github.com/sylvinus/exav) as the engine closes ClamAV's
   silent-`OK`-on-skipped-file gap.
 

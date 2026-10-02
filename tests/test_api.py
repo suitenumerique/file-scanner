@@ -1,15 +1,22 @@
-"""HTTP API: metrics, health, version, auth, and the sync /api/v1.0/scan endpoint."""
+"""HTTP API: metrics, health, version, auth, and the sync scan endpoint.
+
+The scan cases below exercise the current version (v2). The frozen v1 shape has
+its own cases at the end of the file; the mapping behind it is covered in
+``test_wire.py``.
+"""
 
 from unittest import mock
 
 import clamd
 import pytest
+from conftest import is_eicar_signature
 
 import metrics
 from app import settings
 from scanner import VersionInfo
 
-SCAN_URL = "/api/v1.0/scan"
+SCAN_URL = "/api/v2.0/scan"
+SCAN_URL_V1 = "/api/v1.0/scan"
 
 
 def test_metrics_endpoint(client):
@@ -110,18 +117,18 @@ def test_auth_ok(auth_client):
 
 
 @pytest.mark.integration
-def test_eicar(auth_client, eicar, eicar_outputs):
+def test_eicar(auth_client, eicar):
     r = auth_client.post(SCAN_URL, files={"file": ("eicar.txt", eicar)})
     assert r.status_code == 200
-    assert r.json()["malware"]
-    assert r.json()["scanners"][0]["reason"] in eicar_outputs
+    assert r.json()["verdicts"]["malware"]["kind"] == "malware"
+    assert is_eicar_signature(r.json()["scanners"][0]["reason"])
 
 
 @pytest.mark.integration
 def test_clean_file(auth_client):
     r = auth_client.post(SCAN_URL, files={"file": ("clean.txt", b"NO VIRUS")})
     assert r.status_code == 200
-    assert r.json()["malware"] is False
+    assert r.json()["verdicts"]["malware"]["kind"] == "clean"
     assert r.json()["scanners"][0]["kind"] == "clean"
 
 
@@ -130,23 +137,23 @@ def test_payload_right_size(auth_client):
     content = b"\0" * (settings.max_upload_size - 10000)
     r = auth_client.post(SCAN_URL, files={"file": ("big.bin", content)})
     assert r.status_code == 200
-    assert r.json()["malware"] is False
+    assert r.json()["verdicts"]["malware"]["kind"] == "clean"
 
 
 # --- exav backend (skipped unless an exav daemon is configured + reachable) ---
 
 
 @pytest.mark.exav
-def test_exav_eicar(auth_client, eicar, eicar_outputs):
+def test_exav_eicar(auth_client, eicar):
     r = auth_client.post(
         f"{SCAN_URL}?scanners=exav", files={"file": ("eicar.txt", eicar)}
     )
     assert r.status_code == 200
     entry = r.json()["scanners"][0]
-    assert r.json()["malware"]
+    assert r.json()["verdicts"]["malware"]["kind"] == "malware"
     assert entry["scanner"] == "exav"
     assert entry["category"] == "malware"
-    assert entry["reason"] in eicar_outputs
+    assert is_eicar_signature(entry["reason"])
 
 
 @pytest.mark.exav
@@ -155,7 +162,7 @@ def test_exav_clean(auth_client):
         f"{SCAN_URL}?scanners=exav", files={"file": ("clean.txt", b"NO VIRUS")}
     )
     assert r.status_code == 200
-    assert r.json()["malware"] is False
+    assert r.json()["verdicts"]["malware"]["kind"] == "clean"
     assert r.json()["scanners"][0]["scanner"] == "exav"
     assert r.json()["scanners"][0]["kind"] == "clean"
 
@@ -169,16 +176,20 @@ def test_payload_too_large(auth_client):
 # --- verdict mapping (mocked INSTREAM) ---
 
 
-def test_unscannable_not_malware(auth_client, clamav_cd):
-    # An ERROR reply is unscannable, never malware. The clamav backend flattens
-    # it to UNSCANNABLE (exav would preserve its structured tag — see
-    # test_scanner.py::test_exav_error_tag_is_unscannable).
+def test_partial_is_neither_clean_nor_malware(auth_client, clamav_cd):
+    # An ERROR reply is partial: never malware, never clean either — the
+    # verdict names the file as the reason. The clamav backend flattens that
+    # reason to UNSCANNABLE (exav preserves its category).
     clamav_cd.instream.return_value = {"stream": ("ERROR", "Encrypted data")}
     r = auth_client.post(SCAN_URL, files={"file": ("locked.zip", b"data")})
     assert r.status_code == 200
-    assert r.json()["malware"] is False
-    entry = r.json()["scanners"][0]
-    assert entry["kind"] == "unscannable"
+    body = r.json()
+    assert body["verdicts"]["malware"] == {
+        "kind": "partial",
+        "reason": "UNSCANNABLE",
+    }
+    entry = body["scanners"][0]
+    assert entry["kind"] == "partial"
     assert entry["reason"] == "UNSCANNABLE"
 
 
@@ -188,7 +199,7 @@ def test_all_scanners_error_returns_503(auth_client, clamav_cd):
     assert r.status_code == 503
 
 
-def test_untagged_file_error_is_unscannable(auth_client, clamav_cd):
+def test_untagged_file_error_is_partial(auth_client, clamav_cd):
     clamav_cd.instream.return_value = {"stream": ("ERROR", "Broken archive")}
     r = auth_client.post(SCAN_URL, files={"file": ("f.bin", b"data")})
     assert r.status_code == 200
@@ -213,7 +224,7 @@ def test_categories_param_selects(auth_client, clamav_cd):
     )
     assert r.status_code == 200
     body = r.json()
-    assert body["malware"] is False  # per-category top-level key
+    assert body["verdicts"]["malware"]["kind"] == "clean"  # the axis answered
     assert body["scanners"][0]["scanner"] == "clamav"
 
 
@@ -263,3 +274,55 @@ def test_probe_access_logs_are_dropped_when_successful():
     # A record that isn't uvicorn's access line passes through untouched.
     other = logging.LogRecord("uvicorn.access", logging.INFO, "", 0, "hi", (), None)
     assert flt.filter(other) is True
+
+
+# --- the frozen v1 shape -----------------------------------------------------
+
+
+def test_v1_reports_a_clean_axis_as_a_scalar(auth_client, clamav_cd):
+    """A caller written before verdicts existed keeps the endpoint it signed up
+    for, and the shape it was promised — computed by today's logic."""
+    clamav_cd.instream.return_value = {"stream": ("OK", None)}
+    r = auth_client.post(SCAN_URL_V1, files={"file": ("f.txt", b"data")})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["malware"] is False
+    assert "verdicts" not in body
+    assert body["scanners"][0]["scanner"] == "clamav"
+
+
+def test_v1_reports_a_detection_as_true(auth_client, clamav_cd):
+    clamav_cd.instream.return_value = {"stream": ("FOUND", "Eicar-Test-Signature")}
+    r = auth_client.post(SCAN_URL_V1, files={"file": ("evil.com", b"data")})
+    assert r.json()["malware"] is True
+
+
+def test_v1_qualifies_an_unreadable_file_with_an_error_kind(auth_client, clamav_cd):
+    """The one thing a bare scalar could never say, and why v2 exists: ``None``
+    alone cannot tell an unreadable file from a failed engine."""
+    clamav_cd.instream.return_value = {"stream": ("ERROR", "Encrypted data")}
+    r = auth_client.post(SCAN_URL_V1, files={"file": ("locked.zip", b"data")})
+    body = r.json()
+    assert body["malware"] is None
+    assert body["error_kind"] == "file"
+
+
+def test_the_two_versions_answer_the_same_file_consistently(auth_client, clamav_cd):
+    """Same computation, two vocabularies: the shapes differ, the conclusion
+    cannot."""
+    clamav_cd.instream.return_value = {"stream": ("FOUND", "Eicar-Test-Signature")}
+    files = {"file": ("evil.com", b"data")}
+    v2 = auth_client.post(SCAN_URL, files=files).json()
+    v1 = auth_client.post(SCAN_URL_V1, files=files).json()
+    assert v2["verdicts"]["malware"]["kind"] == "malware"
+    assert v1["malware"] is True
+
+    def _findings(body):
+        # ``time`` is a measured duration, so it differs between two scans of
+        # the same bytes; everything the caller reasons about must not.
+        return [
+            {k: v for k, v in entry.items() if k != "time"}
+            for entry in body["scanners"]
+        ]
+
+    assert _findings(v1) == _findings(v2)  # the breakdown is the same evidence

@@ -1,4 +1,4 @@
-"""Optional async-job result store and the GET /api/v1.0/jobs/{job_id} poll route.
+"""Optional async-job result store and the GET /api/vX.0/jobs/{job_id} poll route.
 
 The store is opt-in (WORKER_RESULT_TTL); these tests enable it by monkeypatching the
 TTL and clearing the in-process eager-mode store between cases.
@@ -12,8 +12,9 @@ import results
 import tasks
 from app import settings
 
-JOBS_URL = "/api/v1.0/jobs"
-ASYNC_URL = "/api/v1.0/scan-async"
+JOBS_URL = "/api/v2.0/jobs"
+JOBS_URL_V1 = "/api/v1.0/jobs"
+ASYNC_URL = "/api/v2.0/scan-async"
 
 
 @pytest.fixture
@@ -34,10 +35,15 @@ def test_store_disabled_is_noop(monkeypatch):
 
 
 def test_store_roundtrip(store_on):
-    results.record("j1", "owner", {"job_id": "j1", "status": "done", "malware": False})
+    record = {
+        "job_id": "j1",
+        "status": "done",
+        "verdicts": {"malware": {"kind": "clean"}},
+    }
+    results.record("j1", "owner", record)
     got = results.fetch("j1", "owner")
     assert got["status"] == "done"
-    assert got["malware"] is False
+    assert got["verdicts"]["malware"]["kind"] == "clean"
 
 
 def test_store_owner_scoped(store_on):
@@ -119,7 +125,7 @@ def test_poll_pending_then_done(auth_client, clamav, store_on):
 
     body = auth_client.get(f"{JOBS_URL}/{job_id}").json()
     assert body["status"] == "done"
-    assert body["malware"] is False
+    assert body["verdicts"]["malware"]["kind"] == "clean"
     assert body["scanners"][0]["kind"] == "clean"
 
 
@@ -152,3 +158,40 @@ def test_poll_records_error(auth_client, clamav, store_on):
     body = auth_client.get(f"{JOBS_URL}/{job_id}").json()
     assert body["status"] == "error"
     assert body["error_kind"] == "transient"
+
+
+# --- a poll is served in the version it asks for -----------------------------
+
+
+@pytest.fixture
+def stored_job():
+    """A canonical (v2) terminal record, served to any poll — the store itself is
+    stubbed out here; its own round-trip is covered above."""
+    import app
+
+    record = {
+        "job_id": "j1",
+        "status": "done",
+        "verdicts": {"malware": {"kind": "partial", "reason": "UNSCANNABLE"}},
+        "scanners": [{"scanner": "clamav", "category": "malware", "kind": "partial"}],
+    }
+    with (
+        mock.patch.object(app.results, "enabled", return_value=True),
+        mock.patch.object(app.results, "fetch", return_value=record),
+    ):
+        yield record
+
+
+def test_a_v2_poll_returns_the_verdicts(auth_client, stored_job):
+    body = auth_client.get(f"{JOBS_URL}/j1").json()
+    assert body["verdicts"]["malware"]["kind"] == "partial"
+    assert body["api_version"] == "v2.0"
+
+
+def test_a_v1_poll_of_the_same_job_is_downgraded(auth_client, stored_job):
+    """The record is held canonically, so the version is decided by the route —
+    either one can poll any job, whatever it was submitted under."""
+    body = auth_client.get(f"{JOBS_URL_V1}/j1").json()
+    assert body["malware"] is None and body["error_kind"] == "file"
+    assert "verdicts" not in body
+    assert body["api_version"] == "v1.0"

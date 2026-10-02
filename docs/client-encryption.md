@@ -71,7 +71,9 @@ The `key` is URL-safe base64 (`A–Z a–z 0–9 - _`, optional `=` padding) of 
   (upper bound), and a tiny chunk_size would inflate the chunk count into a CPU
   cost (lower bound). Only the *uniform* `chunk_size` is bounded — the final
   chunk may be as small as one byte.
-- The download size limit (`MAX_URL_SIZE`) counts **ciphertext** bytes.
+- The download size limit (`MAX_URL_SIZE`) counts **plaintext** bytes: the
+  wire may carry one IV + tag (28 bytes) more per `chunk_size` of it, and the
+  decrypted output is capped at `MAX_URL_SIZE` itself.
 
 ## Key handling
 

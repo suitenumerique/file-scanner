@@ -11,6 +11,7 @@ from dramatiq.middleware import CurrentMessage
 import encryption
 import jwt_auth
 import results
+import wire
 from broker import register_task
 from config import get_settings
 from scanner import ScannerError, run_scanners
@@ -116,35 +117,57 @@ class FileError(Exception):
     permanent, so it is reported at once rather than retried."""
 
 
-def _report_error(result, webhook_url, owner, kind, message):
+def _report_error(result, webhook_url, owner, version, kind, message):
     """Populate ``result`` with a pre-scan error, then persist + deliver it."""
     result.update(status=results.ERROR, error_kind=kind, error=message)
-    _finalize(result, webhook_url, owner)
+    _finalize(result, webhook_url, owner, version)
 
 
-def _deliver(result, webhook_url, owner, report, *, transient_error=False):
+def _deliver(result, webhook_url, owner, version, report, *, transient_error=False):
     """Attach the per-scanner report, then persist + deliver the terminal result."""
-    result.update(report.as_dict())  # malware + scanners breakdown
+    result.update(report.as_dict())  # verdicts + per-scanner breakdown
     if transient_error:
         result.update(
             status=results.ERROR, error_kind="transient", error="all scanners failed"
         )
     else:
         result["status"] = results.DONE
-    _finalize(result, webhook_url, owner)
+    _finalize(result, webhook_url, owner, version)
 
 
-def _finalize(result, webhook_url, owner):
+def _finalize(result, webhook_url, owner, version):
     """Record the terminal result for polling (no-op when the store is disabled)
     and enqueue its webhook delivery (when a ``webhook_url`` was given). At least
     one channel is always present — the endpoint requires a webhook unless the
-    store is enabled."""
+    store is enabled.
+
+    The record is stored **canonically** (v2), so either version can poll any
+    job; only the webhook body is shaped here, to the version the job was
+    submitted under, because a callback has no route to ask with."""
     results.record(result["job_id"], owner, result)
     if webhook_url:
-        deliver_webhook.send(webhook_url, result)
+        deliver_webhook.send(webhook_url, wire.serialize(result, version))
 
 
-def _check_limits(read_bytes, download_start):
+def _wire_cap(encryption_params) -> int:
+    """The most bytes a source may send: ``MAX_URL_SIZE`` counts the file —
+    the plaintext — so a client-encrypted source gets the room its chunking
+    adds (one IV + tag per chunk of ``MAX_URL_SIZE`` plaintext). Malformed
+    params fall back to the bare cap; decryption rejects them properly."""
+    cap = settings.max_url_size
+    if not encryption_params:
+        return cap
+    try:
+        chunk_size = int(encryption_params["chunk_size"])
+    except (KeyError, TypeError, ValueError):
+        return cap
+    if chunk_size <= 0:
+        return cap
+    chunks = max(1, -(-cap // chunk_size))
+    return cap + chunks * encryption.OVERHEAD_PER_CHUNK
+
+
+def _check_limits(read_bytes, download_start, wire_cap):
     """Enforce the size + total-time download budgets mid-stream (raises
     ``FileError``). The per-read socket timeout alone can't stop a server that
     dribbles one byte just inside each window (slow-drip DoS), and a missing or
@@ -154,9 +177,9 @@ def _check_limits(read_bytes, download_start):
             f"download_timeout: exceeded {settings.download_max_seconds}s "
             "total transfer budget"
         )
-    if read_bytes > settings.max_url_size:
+    if read_bytes > wire_cap:
         raise FileError(
-            f"file_too_large: streamed over {settings.max_url_size} bytes "
+            f"file_too_large: streamed over {wire_cap} bytes "
             "(Content-Length missing or understated)"
         )
 
@@ -171,7 +194,7 @@ def _write_plaintext(response, file_path, download_start):
     with contextlib.closing(response), open(file_path, "wb") as f:
         for chunk in response.iter_content(chunk_size=8192):
             read += len(chunk)
-            _check_limits(read, download_start)
+            _check_limits(read, download_start, settings.max_url_size)
             f.write(chunk)
 
 
@@ -179,7 +202,8 @@ def _write_decrypted(response, file_path, download_start, enc):
     """Stream the ciphertext, decrypt chunk by chunk, write plaintext.
 
     Buffers wire bytes until a whole crypto chunk is available; only the tail may
-    be short. The cap counts ciphertext bytes, which bounds the plaintext too.
+    be short. The wire is bounded by ``MAX_URL_SIZE`` plus the chunking
+    overhead, and the plaintext written by ``MAX_URL_SIZE`` itself.
     """
     scheme = enc.get("scheme", encryption.SCHEME)
     if scheme not in encryption.SCHEMES:
@@ -199,32 +223,41 @@ def _write_decrypted(response, file_path, download_start, enc):
     if parts < 0:
         raise encryption.DecryptionError(f"invalid parts {parts}")
     blob_size = chunk_size + encryption.OVERHEAD_PER_CHUNK
+    wire_cap = _wire_cap(enc)
+
+    def _write_plain(f, plain, written):
+        written += len(plain)
+        if written > settings.max_url_size:
+            raise FileError(
+                f"file_too_large: plaintext over {settings.max_url_size} bytes"
+            )
+        f.write(plain)
+        return written
 
     buffer = bytearray()
     part_number = 0
     read = 0
+    written = 0
     with contextlib.closing(response), open(file_path, "wb") as f:
         for chunk in response.iter_content(chunk_size=8192):
             read += len(chunk)
-            _check_limits(read, download_start)
+            _check_limits(read, download_start, wire_cap)
             buffer.extend(chunk)
             while len(buffer) >= blob_size:
                 part_number += 1
-                f.write(
-                    encryption.decrypt_chunk(
-                        key, bytes(buffer[:blob_size]), file_id, part_number, parts
-                    )
+                plain = encryption.decrypt_chunk(
+                    key, bytes(buffer[:blob_size]), file_id, part_number, parts
                 )
+                written = _write_plain(f, plain, written)
                 del buffer[:blob_size]
         # A shorter tail chunk just means the plaintext wasn't an exact multiple
         # of chunk_size; an empty buffer here means it was.
         if buffer:
             part_number += 1
-            f.write(
-                encryption.decrypt_chunk(
-                    key, bytes(buffer), file_id, part_number, parts
-                )
+            plain = encryption.decrypt_chunk(
+                key, bytes(buffer), file_id, part_number, parts
             )
+            written = _write_plain(f, plain, written)
     # Trailing-truncation guard: per-chunk auth can't see whole trailing chunks
     # dropped on a boundary, so the caller-declared total (bound into every
     # chunk's AAD) must match what we actually decrypted.
@@ -250,6 +283,7 @@ def scan_task(
     metadata=None,
     api_client="",
     encryption_params=None,
+    wire_version=wire.V1,
 ):
     """Download a file from ``url``, scan it with ``scanners``, and push the
     per-scanner report to ``webhook_url``.
@@ -263,6 +297,12 @@ def scan_task(
     the source as client-encrypted: decrypt before scanning, since a scanner would
     otherwise pronounce opaque ciphertext clean. Omit it and the body is scanned
     as-is.
+
+    ``wire_version`` is the API version the job was submitted under. The webhook
+    is a callback with no route of its own, so it is the only way the shape of
+    the delivered body can be known here; it defaults to ``v1`` so a message
+    already queued by an older worker is answered in the shape its caller
+    expects.
     """
     file_path = None
     result = {"job_id": job_id, "filename": filename, "metadata": metadata}
@@ -279,17 +319,18 @@ def scan_task(
         # Size guard, defence in depth: trust the Content-Length header for a
         # cheap up-front reject, then also cap the bytes actually written — a
         # missing, malformed or understated header must not let an unbounded
-        # body fill the scan volume.
+        # body fill the scan volume. The wire cap is MAX_URL_SIZE plus, for a
+        # client-encrypted source, the room its chunking adds.
+        wire_cap = _wire_cap(encryption_params)
         declared = response.headers.get("Content-Length")
         try:
             declared = int(declared) if declared else None
         except ValueError:
             declared = None
-        if declared and declared > settings.max_url_size:
+        if declared and declared > wire_cap:
             response.close()
             raise FileError(
-                f"file_too_large: {declared} bytes exceeds "
-                f"{settings.max_url_size} limit"
+                f"file_too_large: {declared} bytes exceeds {wire_cap} limit"
             )
 
         # Stream to disk (both writers enforce the size + total-time budgets via
@@ -309,7 +350,7 @@ def scan_task(
 
     except FileError as exc:
         logger.error(f"Job {job_id} file error: {exc}")
-        _report_error(result, webhook_url, api_client, "file", str(exc))
+        _report_error(result, webhook_url, api_client, wire_version, "file", str(exc))
         return
 
     except encryption.DecryptionError as exc:
@@ -317,13 +358,25 @@ def scan_task(
         # the caller drops the file instead of looping. Never log the key.
         logger.error(f"Job {job_id} decryption failed: {exc}")
         _report_error(
-            result, webhook_url, api_client, "file", f"decryption_failed: {exc}"
+            result,
+            webhook_url,
+            api_client,
+            wire_version,
+            "file",
+            f"decryption_failed: {exc}",
         )
         return
 
     except SSRFValidationError as exc:
         logger.error(f"Job {job_id} blocked by scan policy: {exc}")
-        _report_error(result, webhook_url, api_client, "file", f"ssrf_blocked: {exc}")
+        _report_error(
+            result,
+            webhook_url,
+            api_client,
+            wire_version,
+            "file",
+            f"ssrf_blocked: {exc}",
+        )
         return
 
     except http_requests.RequestException as exc:
@@ -331,14 +384,21 @@ def scan_task(
         # so a stale/expired presigned URL wouldn't recover on retry.
         logger.error(f"Job {job_id} download failed: {exc}")
         _report_error(
-            result, webhook_url, api_client, "transient", f"download_failed: {exc}"
+            result,
+            webhook_url,
+            api_client,
+            wire_version,
+            "transient",
+            f"download_failed: {exc}",
         )
         return
 
     except Exception as exc:
         logger.error(f"Job {job_id} unexpected error: {exc}")
         if _retries_exhausted():
-            _report_error(result, webhook_url, api_client, "transient", str(exc))
+            _report_error(
+                result, webhook_url, api_client, wire_version, "transient", str(exc)
+            )
             return
         raise
 
@@ -346,13 +406,18 @@ def scan_task(
         if file_path and os.path.exists(file_path):
             os.remove(file_path)
 
-    # Download + scan succeeded. When EVERY scanner failed transiently, retry the
-    # whole job; report only once the budget is spent.
+    # Download + scan succeeded. When every deciding scanner failed transiently
+    # and nothing was detected, retry the whole job; report only once the budget
+    # is spent. A detection — even from an advisory engine — is reported now:
+    # no retry can make it truer, and the caller must not be told "unavailable"
+    # about a file we know is infected.
     if report.all_errored:
         if not _retries_exhausted():
             raise ScannerError("all scanners failed transiently")
-        _deliver(result, webhook_url, api_client, report, transient_error=True)
+        _deliver(
+            result, webhook_url, api_client, wire_version, report, transient_error=True
+        )
         return
 
     logger.info(f"Async scan job {job_id} complete. Malware: {report.malware}")
-    _deliver(result, webhook_url, api_client, report)
+    _deliver(result, webhook_url, api_client, wire_version, report)
