@@ -296,7 +296,7 @@ check, which only passes once the database is loaded. Give it a writable
 ```sh
 printf 'nPING\n' | nc <exav-host> 3310          # PONG once the database is loaded
 curl -sf -H "Authorization: Bearer $TOKEN" -F "file=@eicar.txt" \
-     "http://localhost:8090/api/v1.0/scan?scanners=exav"
+     "http://localhost:8090/api/v2.0/scan?scanners=exav"
 # → "verdicts": {"malware": {"kind": "malware", "reason": "Eicar-Test-Signature"}}
 ```
 

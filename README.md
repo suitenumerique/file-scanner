@@ -55,10 +55,10 @@ printf '%s' 'X5O!P%@AP[4\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H
 
 # Throwaway dev private key for caller "dev-issuer" (matches JWT_ISSUER_KEYS in deploy/env/app.defaults).
 DEV_PRIV=Higc3cLT742BJB5GiPnW5Ypg0xCGoVYY-s07ssMVlsg
-TOKEN=$(docker compose exec -T app python deploy/scripts/mint-token.py "$DEV_PRIV" dev-issuer POST /api/v1.0/scan)
+TOKEN=$(docker compose exec -T app python deploy/scripts/mint-token.py "$DEV_PRIV" dev-issuer POST /api/v2.0/scan)
 
 curl -sf -H "Authorization: Bearer $TOKEN" -F "file=@/tmp/eicar.txt" \
-     http://localhost:8090/api/v1.0/scan
+     http://localhost:8090/api/v2.0/scan
 # {"verdicts": {"malware": {"kind": "malware", "reason": "Eicar-Test-Signature"}},
 #  "scanners": [{"scanner": "clamav", "category": "malware", "kind": "malware",
 #                "reason": "Eicar-Test-Signature", "time": 0.003}]}

@@ -166,12 +166,20 @@ whole reason the report shape looks the way it does.
 | `verdicts[axis].kind` | what did the scan **conclude**? |
 | `error_kind: file \| transient` | on `status: error` only: was the job's failure the file's fault or the infrastructure's? |
 
-A `status: error` means there is no verdict to report — the URL could not be
-fetched, the file was too large to download, decryption failed, or no deciding
-engine was up. `error_kind: "file"` there describes a file that was **never
-scanned**. A `partial` verdict describes a file that **was** scanned and could
-not be read. Collapsing the two is the mistake this vocabulary exists to
-prevent.
+`status: error` covers two cases, told apart by whether the body carries a
+report at all.
+
+- **Before scanning** — the URL could not be fetched, the file was too large to
+  download, decryption failed. No engine ran, so there are no `verdicts` and no
+  `scanners`. `error_kind` is `file` for a file that can never be scanned and
+  `transient` for anything worth retrying.
+- **Every deciding engine failed** — they ran and none could answer. The report
+  *is* there: the axis's verdict is `error`, and `scanners` lists each failure.
+  `error_kind` is always `transient`.
+
+So `error_kind: "file"` describes a file that was **never scanned**, while a
+`partial` verdict describes one that **was** scanned and could not be read.
+Collapsing the two is the mistake this vocabulary exists to prevent.
 
 ## 7. Downstream
 
