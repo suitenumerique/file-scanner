@@ -11,8 +11,8 @@
 # production image needs no writable data volume and runs as the distroless
 # `nonroot` user (uid 65532) with no entrypoint gymnastics.
 
-ARG PYTHON_VERSION=3.14.6
-ARG UV_VERSION=0.11.28
+ARG PYTHON_VERSION=3.14.7
+ARG UV_VERSION=0.12.19
 
 # ---- uv binary: ARG expansion is allowed in FROM (unlike COPY --from) ----
 FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS uv-bin

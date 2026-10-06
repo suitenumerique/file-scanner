@@ -111,6 +111,8 @@ lint-helm: ## lint the Helm chart, render it in the shapes we ship, check the wi
 		--set ingress.enabled=true \
 		--set metrics.serviceMonitor.enabled=true \
 		--set networkPolicy.enabled=true \
+		--set exav.enabled=true \
+		--set exav.dbUrl=https://example.org/exav.exavdb \
 		--set app.podDisruptionBudget.enabled=true \
 		--set worker.podDisruptionBudget.enabled=true \
 		--set secrets.JWT_SIGNING_KEY=ci-only \
@@ -121,8 +123,11 @@ lint-helm: ## lint the Helm chart, render it in the shapes we ship, check the wi
 		--set redis.enabled=false \
 		--set secrets.existingSecret=scanner \
 		--set worker.queues=scans > /dev/null
-	@out=$$($(HELM) template ci $(HELM_CHART_ARG)); \
+	@out=$$($(HELM) template ci $(HELM_CHART_ARG) \
+		--set exav.enabled=true \
+		--set exav.dbUrl=https://example.org/exav.exavdb); \
 		echo "$$out" | grep -q 'value: "ci-file-scanner-clamav:3310"' && \
+		echo "$$out" | grep -q 'value: "ci-file-scanner-exav:3310"' && \
 		echo "$$out" | grep -q 'value: "redis://ci-file-scanner-redis:6379/0"' && \
 		! echo "$$out" | grep -q '^kind: Secret' || { echo "bundled-service wiring broken"; exit 1; }
 	@out=$$($(HELM) template ci $(HELM_CHART_ARG) --set clamav.enabled=false --set redis.enabled=false --set config.CLAMAV_HOSTS=x:1); \

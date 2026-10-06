@@ -25,7 +25,7 @@ from http import HTTPStatus
 import requests
 
 from config import get_settings
-from scanner import Scanner, ScannerError, Verdict, clean, malware, unscannable
+from scanner import Scanner, ScannerError, Verdict, clean, malware, partial
 
 logger = logging.getLogger("file-scanner")
 
@@ -159,7 +159,9 @@ class JcopScanner(Scanner):
             return malware(content.get("error") or "malware")
         if is_malware is False:
             return clean()
-        # done but no clear verdict: JCOP couldn't classify the file.
+        # done but no clear verdict: JCOP couldn't classify the file. The tags
+        # are the shared vocabulary exav defines, not JCOP's wording — a caller
+        # grouping "a limit was hit" must not have to know which engine ran.
         if content.get("error_code") == _TOO_LARGE_CODE:
-            return unscannable("TOO-LARGE")
-        return unscannable("UNSCANNABLE")
+            return partial("LIMITS-EXCEEDED")
+        return partial("UNSCANNABLE")

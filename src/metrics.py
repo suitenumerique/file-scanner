@@ -17,7 +17,7 @@ from prometheus_client import Counter, Gauge, Histogram
 SCANS = Counter(
     "filescanner_scans_total",
     "File scans by scanner, category, verdict "
-    "(clean/malware/flagged/unscannable/error), and API client (the JWT `iss` "
+    "(clean/malware/flagged/partial/error), and API client (the JWT `iss` "
     "of the caller that made the request).",
     ["scanner", "category", "verdict", "api_client"],
 )
