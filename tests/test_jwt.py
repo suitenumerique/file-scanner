@@ -145,14 +145,28 @@ def caller():
 
 def test_sync_scan_with_jwt(client, caller, clamav_cd):
     clamav_cd.instream.return_value = {"stream": ("OK", None)}
-    tok = _mint(caller, htu="/api/v1.0/scan")
+    tok = _mint(caller, htu="/api/v2.0/scan")
     r = client.post(
-        "/api/v1.0/scan",
+        "/api/v2.0/scan",
         files={"file": ("f.txt", b"hello")},
         headers={"Authorization": f"Bearer {tok}"},
     )
     assert r.status_code == 200
-    assert r.json()["malware"] is False
+    assert r.json()["verdicts"]["malware"]["kind"] == "clean"
+
+
+def test_a_token_is_bound_to_the_version_it_was_minted_for(client, caller, clamav_cd):
+    """Each version is its own path, and the token names the path — so a token
+    minted for v1 cannot be replayed against v2. Worth pinning: it means a
+    caller changing version changes what it signs, not just where it posts."""
+    clamav_cd.instream.return_value = {"stream": ("OK", None)}
+    tok = _mint(caller, htu="/api/v1.0/scan")
+    r = client.post(
+        "/api/v2.0/scan",
+        files={"file": ("f.txt", b"hello")},
+        headers={"Authorization": f"Bearer {tok}"},
+    )
+    assert r.status_code == 401
 
 
 def test_sync_scan_wrong_target_rejected(client, caller, clamav_cd):

@@ -36,9 +36,14 @@ config:
   JWT_SIGNING_KID: ""
   DEFAULT_SCANNERS: '{"malware": ["clamav"]}'
   DEFAULT_CATEGORIES: malware
+  # Engines that scan for information only: their detections count, their
+  # failure to examine a file does not when another engine of the category
+  # did. E.g. "clamav" next to exav (docs/categories.md#advisory-scanners).
+  ADVISORY_SCANNERS: ""
   # Overrides the bundled clamav service address when set (e.g. an external
   # daemon pool "host:3310,host2:3310").
   CLAMAV_HOSTS: ""
+  # Same for the bundled exav service (exav.enabled).
   EXAV_HOSTS: ""
   MAX_UPLOAD_SIZE: "104857600"
   MAX_URL_SIZE: "2147483648"
@@ -233,6 +238,78 @@ clamav:
   affinity: {}
 
 # ---------------------------------------------------------------------------
+# Bundled exav daemon (https://exav.org) — a second malware engine, off by
+# default. Enable it and name it in config.DEFAULT_SCANNERS (e.g.
+# '{"malware": ["clamav", "exav"]}') or select it per request ("scanners").
+# It loads a prebuilt .exavdb pulled over HTTP (dbUrl, required) and polls
+# it for updates, so it needs neither signature sources nor a volume.
+# ---------------------------------------------------------------------------
+exav:
+  enabled: false
+  image:
+    repository: ghcr.io/sylvinus/exav
+    tag: "0.0.1"
+    pullPolicy: IfNotPresent
+  replicaCount: 1
+  port: 3310
+  # The prebuilt database (see docs/deployment.md#running-exav for how one
+  # is built and served). https:// only: the daemon does not verify the
+  # database's signature, so the transport is what protects it.
+  dbUrl: ""
+  # Allow a plain http:// dbUrl (an isolated in-cluster mirror).
+  dbUrlAllowHttp: false
+  # Instead of dbUrl: a Secret holding the URL, for one that carries
+  # credentials (basic auth) — it then never appears in the manifest. The
+  # value must be an https:// URL for the same reason as dbUrl (exav does
+  # not verify the database's signature). The chart cannot read a Secret,
+  # so it neither checks this nor applies dbUrlAllowHttp to it: the
+  # operator is responsible for the scheme.
+  dbUrlSecret:
+    name: ""
+    key: EXAV_DB_URL
+  # How often the daemon re-checks dbUrl (a HEAD on the ETag).
+  updateIntervalSecs: 300
+  # Temp space one streamed file may take while scanned, and the wall clock
+  # one scan may run: above MAX_URL_SIZE, like clamd's StreamMaxLength.
+  maxSpillBytes: 2200M
+  maxScanSecs: 900
+  # Extra EXAV_* environment (every exav flag maps to EXAV_<FLAG>).
+  extraEnv: {}
+  # The downloaded database and the spill area.
+  dbSizeLimit: 4Gi
+  tmpSizeLimit: 8Gi
+  # Loading a prebuilt database costs about its size in memory.
+  resources:
+    requests:
+      cpu: 500m
+      memory: 2Gi
+    limits:
+      memory: 4Gi
+  # First start downloads the database; give it time.
+  startupProbe:
+    periodSeconds: 10
+    failureThreshold: 90
+  # exav 0.0.1 cuts scans in flight on SIGTERM (callers retry), so this only
+  # has to cover the process exiting.
+  terminationGracePeriodSeconds: 30
+  # Distroless image running as 65532.
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    fsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop: ["ALL"]
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# ---------------------------------------------------------------------------
 # Bundled Redis broker (single node, no persistence needed — the queue is
 # transient by design). Set enabled: false and secrets.WORKER_BROKER_URL to
 # use a managed Redis.
@@ -250,8 +327,8 @@ redis:
     limits:
       memory: 256Mi
 
-# Restrict the bundled redis (no password) and clamd (no auth) to the app
-# and worker pods. Needs a CNI that enforces NetworkPolicy.
+# Restrict the bundled redis (no password), clamd and exav (no auth) to the
+# app and worker pods. Needs a CNI that enforces NetworkPolicy.
 networkPolicy:
   enabled: false
 

@@ -70,11 +70,16 @@ def test_submit_then_poll_to_clean(jcop):
 
 @pytest.mark.parametrize(
     "payload,tag",
-    [({"done": True, "error_code": 413}, "TOO-LARGE"), ({"done": True}, "UNSCANNABLE")],
+    [
+        # JCOP's own 413 is reported with the tag exav defines, not a third
+        # word for the same thing.
+        ({"done": True, "error_code": 413}, "LIMITS-EXCEEDED"),
+        ({"done": True}, "UNSCANNABLE"),
+    ],
 )
-def test_unclassified_is_unscannable(jcop, payload, tag):
+def test_unclassified_is_partial(jcop, payload, tag):
     v = _scan(jcop, get=[_resp(200, payload)])
-    assert v.kind == "unscannable"
+    assert v.kind == "partial"
     assert v.reason == tag
 
 

@@ -49,6 +49,8 @@ the chart owns.
 | `clamav.enabled` | `true` | Bundled clamd. Set `false` and `config.CLAMAV_HOSTS` for an external pool. |
 | `clamav.conf.*` | 2200M | `StreamMaxLength` / `MaxFileSize` / `MaxScanSize` — must clear `MAX_URL_SIZE`, else big files are cut mid-stream or skipped and reported clean. |
 | `clamav.persistence` | 2Gi PVC | Signature database; `Recreate` strategy because RWO. |
+| `exav.enabled` | `false` | Bundled [exav](https://exav.org) as a second engine; add `exav` to `config.DEFAULT_SCANNERS` (with `config.ADVISORY_SCANNERS=clamav` to let it decide past clamav's 2 GiB ceiling). |
+| `exav.dbUrl` | `""` | The prebuilt `.exavdb` the daemon pulls over HTTPS and polls (`exav.dbUrlAllowHttp=true` for an isolated plain-HTTP mirror). Enabling exav requires this or `exav.dbUrlSecret`, which holds the URL in a Secret when it carries credentials. |
 | `redis.enabled` | `true` | Bundled, non-persistent broker. `false` ⇒ set `secrets.WORKER_BROKER_URL`. |
 | `worker.queues` | `webhooks scans` | Run a second release with `scans` / `webhooks` split to keep callbacks prompt under a backlog. |
 | `worker.downloadSizeLimit` | 8Gi | emptyDir for async downloads: ≥ `MAX_URL_SIZE` × concurrent scans. |
@@ -68,7 +70,8 @@ the chart owns.
 * Every pod runs non-root with a read-only root filesystem, clamav included
   (started through the chart's own entrypoint rather than the image's
   root-only `/init`), so the chart fits a `restricted` Pod Security
-  namespace. `networkPolicy.enabled` fences the bundled redis and clamd.
+  namespace. `networkPolicy.enabled` fences the bundled redis, clamd and
+  exav.
 
 ## Checks
 

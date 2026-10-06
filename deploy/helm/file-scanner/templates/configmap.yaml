@@ -6,8 +6,8 @@ metadata:
     {{- include "file-scanner.labels" . | nindent 4 }}
 data:
   {{- range $key, $value := .Values.config }}
-  {{- /* CLAMAV_HOSTS is resolved in the env block (bundled service or override). */}}
-  {{- if and (ne $key "CLAMAV_HOSTS") (ne (toString $value) "") }}
+  {{- /* CLAMAV_HOSTS / EXAV_HOSTS are resolved in the env block (bundled service or override). */}}
+  {{- if and (ne $key "CLAMAV_HOSTS") (ne $key "EXAV_HOSTS") (ne (toString $value) "") }}
   {{ $key }}: {{ toString $value | quote }}
   {{- end }}
   {{- end }}
