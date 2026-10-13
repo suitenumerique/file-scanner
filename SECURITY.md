@@ -2,26 +2,22 @@
 
 ## Reporting a Vulnerability
 
-If you discover a security vulnerability in this service, please report it
-privately. **Do not open a public issue.**
+Security is very important to us.
 
-Use GitHub's [private vulnerability reporting](https://docs.github.com/en/code-security/security-advisories/guidance-on-reporting-and-writing-information-about-vulnerabilities/privately-reporting-a-security-vulnerability)
-("Report a vulnerability" under the repository's *Security* tab), or contact the
-maintainers directly.
+If you have any issue regarding security, please disclose the information responsibly by emailing us at security@suite.anct.gouv.fr and not by creating an issue on the repository.
 
-Please include:
+We appreciate your effort to make File Scanner more secure.
 
-- a description of the issue and its impact;
-- steps to reproduce (a proof of concept if possible);
-- the affected version or commit.
+## Vulnerability disclosure policy
 
-We will acknowledge your report as quickly as we can and keep you updated on the
-fix and disclosure timeline.
+Working with security issues in an open source project can be challenging, as we are required to disclose potential problems that could be exploited by attackers. With this in mind, our security fix policy is as follows:
 
-## Scope notes
+1. The Maintainers team will handle the fix as usual (Pull Request,
+release).
+2. In the release notes, we will include the identification numbers from the
+GitHub Advisory Database (GHSA) and, if applicable, the Common Vulnerabilities
+and Exposures (CVE) identifier for the vulnerability.
+3. Once this grace period has passed, we will publish the vulnerability.
 
-This service downloads caller-supplied URLs and posts to caller-supplied
-webhooks. Both are protected by the SSRF guard in `ssrf.py` (IP-range blocking,
-resolved-IP pinning, per-hop redirect re-validation). If you find a way to reach
-an internal/metadata address, to have an unscanned file reported as clean, or to
-exhaust worker resources, we especially want to hear about it.
+By adhering to this security policy, we aim to address security concerns
+effectively and responsibly in our open source software project.
