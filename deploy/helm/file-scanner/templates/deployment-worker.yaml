@@ -53,6 +53,14 @@ spec:
               value: {{ .Values.worker.downloadDir | quote }}
           envFrom:
             {{- include "file-scanner.envFrom" . | nindent 12 }}
+          # Pings this pod's worker through Redis and back (src/health.py).
+          livenessProbe:
+            exec:
+              command: ["python", "-m", "health"]
+            initialDelaySeconds: 15
+            periodSeconds: {{ .Values.worker.livenessProbe.periodSeconds }}
+            timeoutSeconds: 10
+            failureThreshold: {{ .Values.worker.livenessProbe.failureThreshold }}
           resources:
             {{- toYaml .Values.worker.resources | nindent 12 }}
           volumeMounts:

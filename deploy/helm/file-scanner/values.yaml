@@ -141,6 +141,13 @@ worker:
   # only to keep callbacks prompt under a scan backlog (see
   # docs/deployment.md#queues).
   queues: "webhooks scans"
+  # The ping waits for a free worker thread, and a scan can hold one for
+  # DOWNLOAD_MAX_SECONDS plus the scan itself (up to ~20 min). The window
+  # (period × threshold) covers that, so a worker busy with long scans is
+  # not killed; a dead one is restarted within it.
+  livenessProbe:
+    periodSeconds: 60
+    failureThreshold: 20
   resources:
     requests:
       cpu: 250m
