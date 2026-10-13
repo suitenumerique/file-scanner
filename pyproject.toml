@@ -104,7 +104,7 @@ ignore = [
 
 [tool.ruff.lint.isort]
 known-first-party = [
-    "app", "broker", "config", "scanner", "scanners", "ssrf",
+    "app", "broker", "config", "health", "scanner", "scanners", "ssrf",
     "tasks", "validation", "version", "worker",
 ]
 known-third-party = ["dns", "clamd", "dramatiq"]

@@ -48,6 +48,14 @@ services:
       MAX_URL_SIZE: *max_url_size
       # Auto-reload the worker on code changes in dev.
       WORKER_WATCH: /app/src
+    # Pings the worker through Redis and back (see src/health.py). Compose
+    # only marks the container unhealthy, it does not restart it.
+    healthcheck:
+      test: ["CMD", "python", "-m", "health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
 
   clamav:
     image: clamav/clamav:1.4

@@ -19,6 +19,7 @@ swapped without renaming configuration):
 """
 
 import os
+import socket
 import sys
 
 from dramatiq.cli import main, make_argument_parser
@@ -26,7 +27,11 @@ from dramatiq.cli import main, make_argument_parser
 # First positional must be the broker module (it sets the global broker); the
 # rest are imported so their actors get registered.
 BROKER_MODULE = "broker"
-TASK_MODULES = ["tasks"]
+TASK_MODULES = ["tasks", "health"]
+# The healthcheck's own queue (see health.py), consumed whatever WORKER_QUEUES
+# says. Not imported from health.py: that would build the broker in this
+# parent process.
+PING_QUEUE = f"ping.{socket.gethostname()}"
 
 
 def build_argv():
@@ -42,7 +47,8 @@ def build_argv():
     if watch:
         argv += ["--watch", watch]
     # --queues takes a variable number of values, so keep it last.
-    argv += ["--queues", *os.getenv("WORKER_QUEUES", "webhooks scans").split()]
+    queues = os.getenv("WORKER_QUEUES", "webhooks scans").split()
+    argv += ["--queues", *queues, PING_QUEUE]
     return argv
 
 

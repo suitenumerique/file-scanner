@@ -186,6 +186,7 @@ def _check_limits(read_bytes, download_start, wire_cap):
 
 def _write_plaintext(response, file_path, download_start):
     """Stream the body straight to disk, bounded by the size + time budgets.
+    Returns the bytes read off the wire.
 
     ``closing(response)`` releases the pooled connection even when a limit trips
     mid-stream (the body isn't fully read).
@@ -196,10 +197,12 @@ def _write_plaintext(response, file_path, download_start):
             read += len(chunk)
             _check_limits(read, download_start, settings.max_url_size)
             f.write(chunk)
+    return read
 
 
 def _write_decrypted(response, file_path, download_start, enc):
     """Stream the ciphertext, decrypt chunk by chunk, write plaintext.
+    Returns the bytes read off the wire (ciphertext).
 
     Buffers wire bytes until a whole crypto chunk is available; only the tail may
     be short. The wire is bounded by ``MAX_URL_SIZE`` plus the chunking
@@ -265,6 +268,7 @@ def _write_decrypted(response, file_path, download_start, enc):
         raise encryption.DecryptionError(
             f"expected {parts} chunks, decrypted {part_number} (truncated?)"
         )
+    return read
 
 
 @register_task(
@@ -338,9 +342,18 @@ def scan_task(
         # first, or the scanner would pronounce opaque ciphertext clean.
         download_start = timeit.default_timer()
         if encryption_params:
-            _write_decrypted(response, file_path, download_start, encryption_params)
+            read = _write_decrypted(
+                response, file_path, download_start, encryption_params
+            )
         else:
-            _write_plaintext(response, file_path, download_start)
+            read = _write_plaintext(response, file_path, download_start)
+        # DOWNLOAD_MAX_SECONDS is enforced on this duration already; logging it
+        # is what makes a slow job readable without subtracting timestamps.
+        elapsed = timeit.default_timer() - download_start
+        logger.info(
+            f"Job {job_id} downloaded {read} bytes in {elapsed:.1f}s "
+            f"({read / max(elapsed, 1e-6) / 1e6:.1f} MB/s)"
+        )
 
         # Each scanner opens its own handle on the downloaded file so they can
         # stream in parallel.
