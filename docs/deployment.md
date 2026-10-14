@@ -257,8 +257,11 @@ Build once, on a host that has the memory, wherever the updater runs:
 
 ```sh
 exav -d /var/lib/clamav --build-db exav.exavdb        # https://www.exav.org/guides/prebuilt-database/
-exav -d /var/lib/clamav --build-db exav.exavdb --build-shard-bytes 1G   # memory-constrained builder
 ```
+
+Build it with the same exav version as the daemon: the format changes
+between versions (it did in 0.0.2), so upgrading the daemon means publishing
+a database rebuilt with the new version first.
 
 Rebuild after each update (a cron right after `freshclam`/`cvd update`) and
 publish the file on plain HTTPS, under a stable URL, from a server that
@@ -288,7 +291,7 @@ check, which only passes once the database is loaded. Give it a writable
   keeps (read-only from its volume); `deploy/env/exav.defaults` says how to
   point it at a prebuilt database instead.
 - **Anything else**: the daemon alone,
-  `docker run -d -p 3310:3310 -v exav:/var/lib/exav -e EXAV_DB_URL=… ghcr.io/sylvinus/exav:0.0.1`,
+  `docker run -d -p 3310:3310 -v exav:/var/lib/exav -e EXAV_DB_URL=… ghcr.io/sylvinus/exav:0.0.2`,
   then `EXAV_HOSTS=<host>:3310` on the app and worker.
 
 ### 4. Check

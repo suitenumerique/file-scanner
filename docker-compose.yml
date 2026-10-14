@@ -90,7 +90,7 @@ services:
   # then `make test` runs the exav-marked tests (otherwise they skip).
   exav:
     profiles: ["exav"]
-    image: ghcr.io/sylvinus/exav:0.0.1
+    image: ghcr.io/sylvinus/exav:0.0.2
     depends_on:
       clamav:
         condition: service_healthy

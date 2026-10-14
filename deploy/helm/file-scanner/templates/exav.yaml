@@ -48,9 +48,9 @@ spec:
       automountServiceAccountToken: false
       securityContext:
         {{- toYaml .Values.exav.podSecurityContext | nindent 8 }}
-      # exav 0.0.1 does not drain on SIGTERM: scans in flight are cut and
-      # their callers retry (the worker treats a dropped connection as a
-      # transient error), so there is nothing a long grace would wait for.
+      # exav does not drain on SIGTERM: scans in flight are answered ERROR
+      # and their callers retry (the worker treats it as a transient error),
+      # so there is nothing a long grace would wait for.
       terminationGracePeriodSeconds: {{ .Values.exav.terminationGracePeriodSeconds }}
       containers:
         - name: exav
