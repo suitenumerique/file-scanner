@@ -12,23 +12,32 @@ retries, anything else is a ``partial`` verdict. The exav backend extends this
 via :meth:`ClamavScanner._error_verdict` to recognise its structured error tags.
 """
 
+import calendar
+import functools
+import logging
 import random
+import time
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 
 import clamd
-import dns.resolver
 
 from config import get_settings
 from scanner import (
     Scanner,
     ScannerError,
     Verdict,
-    VersionInfo,
     clean,
     malware,
     partial,
 )
 
+logger = logging.getLogger("file-scanner")
 settings = get_settings()
+
+# How long a VERSION probe (the /metrics signature-database gauges) may take per
+# daemon. clamd answers it from memory, so a slower daemon is one in trouble.
+_PROBE_TIMEOUT = 2.0
 
 
 def parse_hosts(raw: str) -> list[tuple[str, int]]:
@@ -57,23 +66,36 @@ def _is_transient(reason) -> bool:
     return any(h in (reason or "").lower() for h in _TRANSIENT_HINTS)
 
 
-def parse_local_version(version_text: str) -> str:
-    """'ClamAV 0.100.3/25480/Fri Jun 14 ...' -> '25480'."""
-    return version_text.split("/")[1]
+@dataclass(frozen=True)
+class DatabaseInfo:
+    """The signature database a clamd daemon has loaded."""
+
+    version: int | None  # daily database version; None when none is loaded
+    built: float | None  # its build time (Unix); None when unreadable
 
 
-def parse_remote_version(version_text: str) -> str:
-    """'0.103.1:59:26120:1616678940:...' -> '26120'."""
-    return version_text.split(":")[2]
+def parse_database_info(version_text: str) -> DatabaseInfo:
+    """``'ClamAV 1.4.3/27000/Mon Nov 10 08:23:01 2026'`` → (27000, build time).
 
-
-def _remote_version_text(uri: str) -> str:
-    answers = dns.resolver.resolve(uri, "TXT")
-    version = "unknown"
-    for data in answers:
-        for txt in data.strings:
-            version = txt.decode("utf-8")
-    return version
+    clamd prints the build time with ``ctime()``, in its own timezone — UTC in
+    the official image — so it is read as UTC: a few hours of skew don't matter
+    to a freshness alert counted in days. A daemon without a database answers
+    just ``'ClamAV 1.4.3'``; an out-of-range time, ``'invalid timestamp'``.
+    """
+    parts = version_text.strip().split("/", 2)
+    if len(parts) < 3:
+        return DatabaseInfo(None, None)
+    try:
+        version = int(parts[1])
+    except ValueError:
+        version = None
+    try:
+        built = float(
+            calendar.timegm(time.strptime(parts[2].strip(), "%a %b %d %H:%M:%S %Y"))
+        )
+    except ValueError:
+        built = None
+    return DatabaseInfo(version, built)
 
 
 class ClamavScanner(Scanner):
@@ -156,10 +178,38 @@ class ClamavScanner(Scanner):
             raise ScannerError(f"scan error: {reason}")
         return partial("UNSCANNABLE")
 
-    def version(self) -> VersionInfo:
-        try:
-            local = parse_local_version(self._client().version())
-            remote = parse_remote_version(_remote_version_text(settings.clamav_txt_uri))
-        except Exception as exc:
-            raise ScannerError(f"version check failed: {exc}") from exc
-        return VersionInfo(actual=local, required=remote, outdated=local != remote)
+    def database_info(self) -> dict[str, DatabaseInfo | None]:
+        """The database every daemon of the pool has loaded, keyed ``host:port``
+        (or the socket path); None for a daemon that didn't answer.
+
+        Unlike a scan, which picks one host at random, this asks each one, in
+        parallel: a stale daemon must not hide behind its peers."""
+        socket_path, hosts = self._endpoints()
+        if socket_path:
+            targets = {
+                socket_path: functools.partial(
+                    clamd.ClamdUnixSocket, path=socket_path, timeout=_PROBE_TIMEOUT
+                )
+            }
+        else:
+            targets = {
+                f"{host}:{port}": functools.partial(
+                    clamd.ClamdNetworkSocket,
+                    host=host,
+                    port=port,
+                    timeout=_PROBE_TIMEOUT,
+                )
+                for host, port in hosts
+            }
+
+        def _probe(item):
+            """One daemon's DatabaseInfo, or None if it didn't answer."""
+            daemon, make_client = item
+            try:
+                return parse_database_info(make_client().version())
+            except Exception as exc:
+                logger.warning("clamd %s did not answer VERSION: %s", daemon, exc)
+                return None
+
+        with ThreadPoolExecutor(max_workers=len(targets)) as pool:
+            return dict(zip(targets, pool.map(_probe, targets.items()), strict=True))

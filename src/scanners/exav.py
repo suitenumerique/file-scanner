@@ -15,8 +15,7 @@ exav requires ``EXINSTREAM`` — pointing ``EXAV_HOSTS`` at a daemon without it
 It has its own daemon pool (``EXAV_HOSTS``, ``host:port,...``, balanced per scan)
 so clamav and exav can run in parallel against separate daemons. ``PING`` /
 ``VERSION`` use the standard clamd path; exav manages its own database reloads and
-its ``VERSION`` isn't the ClamAV freshness format, so it reports no signature
-version.
+its ``VERSION`` isn't the ClamAV format, so it reports no signature database.
 """
 
 import json
@@ -26,7 +25,7 @@ import struct
 import clamd
 
 from config import get_settings
-from scanner import ScannerError, Verdict, VersionInfo, clean, partial
+from scanner import ScannerError, Verdict, clean, partial
 from scanners.clamav import ClamavScanner, parse_hosts
 
 settings = get_settings()
@@ -107,5 +106,6 @@ class ExavScanner(ClamavScanner):
             )
         raise ScannerError(f"exav returned an unknown status: {status!r}")
 
-    def version(self) -> VersionInfo | None:
-        return None
+    def database_info(self) -> dict:
+        """exav exposes no signature database info: nothing to report."""
+        return {}

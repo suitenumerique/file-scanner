@@ -10,6 +10,7 @@ from dramatiq.middleware import CurrentMessage
 
 import encryption
 import jwt_auth
+import metrics
 import results
 import wire
 from broker import register_task
@@ -43,6 +44,14 @@ def _retries_exhausted() -> bool:
     if msg is None:
         return True
     return msg.options.get("retries", 0) >= MAX_RETRIES
+
+
+def _webhook_attempts_exhausted() -> bool:
+    """Like :func:`_retries_exhausted`, for ``deliver_webhook``'s own budget."""
+    msg = CurrentMessage.get_current_message()
+    if msg is None:
+        return True
+    return msg.options.get("retries", 0) >= settings.webhook_max_attempts
 
 
 @register_task(
@@ -84,6 +93,7 @@ def deliver_webhook(webhook_url, payload):
     token = jwt_auth.sign_webhook(webhook_url, body)
     if token:
         headers["Authorization"] = f"Bearer {token}"
+    start = timeit.default_timer()
     try:
         # Do NOT follow redirects: the signed token binds this exact webhook_url,
         # and a callback endpoint has no business redirecting. A 3xx is a failed
@@ -102,19 +112,30 @@ def deliver_webhook(webhook_url, payload):
             )
         resp.raise_for_status()
     except SSRFValidationError as exc:
+        metrics.WEBHOOKS.labels("blocked").inc()
         logger.error(f"Webhook host rejected for job {job}: {exc}")
         return
     except http_requests.RequestException as exc:
         # Re-raise so dramatiq retries (back-off) and dead-letters if it never
         # lands; the caller's own reaper remains the last-resort safety net.
+        outcome = "gave_up" if _webhook_attempts_exhausted() else "retry"
+        metrics.WEBHOOKS.labels(outcome).inc()
         logger.warning(f"Webhook delivery failed for job {job}: {exc}")
         raise
+    finally:
+        metrics.WEBHOOK_DURATION.observe(timeit.default_timer() - start)
+    metrics.WEBHOOKS.labels("ok").inc()
     logger.info(f"Webhook delivered for job {job}")
 
 
 class FileError(Exception):
     """A download-side problem with the file itself (oversized, timed out) —
-    permanent, so it is reported at once rather than retried."""
+    permanent, so it is reported at once rather than retried. ``reason`` is
+    the download-outcome metric label (``too_large`` / ``timeout``)."""
+
+    def __init__(self, message: str, *, reason: str):
+        super().__init__(message)
+        self.reason = reason
 
 
 def _report_error(result, webhook_url, owner, version, kind, message):
@@ -126,6 +147,7 @@ def _report_error(result, webhook_url, owner, version, kind, message):
 def _deliver(result, webhook_url, owner, version, report, *, transient_error=False):
     """Attach the per-scanner report, then persist + deliver the terminal result."""
     result.update(report.as_dict())  # verdicts + per-scanner breakdown
+    metrics.record_report(report, metrics.ASYNC, owner)
     if transient_error:
         result.update(
             status=results.ERROR, error_kind="transient", error="all scanners failed"
@@ -144,6 +166,9 @@ def _finalize(result, webhook_url, owner, version):
     The record is stored **canonically** (v2), so either version can poll any
     job; only the webhook body is shaped here, to the version the job was
     submitted under, because a callback has no route to ask with."""
+    metrics.ASYNC_JOBS.labels(
+        result["status"], result.get("error_kind") or "", owner
+    ).inc()
     results.record(result["job_id"], owner, result)
     if webhook_url:
         deliver_webhook.send(webhook_url, wire.serialize(result, version))
@@ -175,12 +200,14 @@ def _check_limits(read_bytes, download_start, wire_cap):
     if timeit.default_timer() - download_start > settings.download_max_seconds:
         raise FileError(
             f"download_timeout: exceeded {settings.download_max_seconds}s "
-            "total transfer budget"
+            "total transfer budget",
+            reason="timeout",
         )
     if read_bytes > wire_cap:
         raise FileError(
             f"file_too_large: streamed over {wire_cap} bytes "
-            "(Content-Length missing or understated)"
+            "(Content-Length missing or understated)",
+            reason="too_large",
         )
 
 
@@ -232,7 +259,8 @@ def _write_decrypted(response, file_path, download_start, enc):
         written += len(plain)
         if written > settings.max_url_size:
             raise FileError(
-                f"file_too_large: plaintext over {settings.max_url_size} bytes"
+                f"file_too_large: plaintext over {settings.max_url_size} bytes",
+                reason="too_large",
             )
         f.write(plain)
         return written
@@ -311,6 +339,7 @@ def scan_task(
     file_path = None
     result = {"job_id": job_id, "filename": filename, "metadata": metadata}
     report = None
+    downloaded = False  # past the download: later failures aren't download ones
     try:
         # Defense in depth: re-enforce the allowlist + SSRF guard at the worker
         # (the request-layer check isn't the only way a job can reach us).
@@ -334,7 +363,8 @@ def scan_task(
         if declared and declared > wire_cap:
             response.close()
             raise FileError(
-                f"file_too_large: {declared} bytes exceeds {wire_cap} limit"
+                f"file_too_large: {declared} bytes exceeds {wire_cap} limit",
+                reason="too_large",
             )
 
         # Stream to disk (both writers enforce the size + total-time budgets via
@@ -350,6 +380,10 @@ def scan_task(
         # DOWNLOAD_MAX_SECONDS is enforced on this duration already; logging it
         # is what makes a slow job readable without subtracting timestamps.
         elapsed = timeit.default_timer() - download_start
+        downloaded = True
+        metrics.DOWNLOADS.labels("ok").inc()
+        metrics.DOWNLOAD_DURATION.observe(elapsed)
+        metrics.FILE_SIZE.labels(metrics.ASYNC).observe(os.path.getsize(file_path))
         logger.info(
             f"Job {job_id} downloaded {read} bytes in {elapsed:.1f}s "
             f"({read / max(elapsed, 1e-6) / 1e6:.1f} MB/s)"
@@ -358,10 +392,14 @@ def scan_task(
         # Each scanner opens its own handle on the downloaded file so they can
         # stream in parallel.
         report = run_scanners(
-            scanners, lambda: open(file_path, "rb"), api_client=api_client
+            scanners,
+            lambda: open(file_path, "rb"),
+            api_client=api_client,
+            mode=metrics.ASYNC,
         )
 
     except FileError as exc:
+        metrics.DOWNLOADS.labels(exc.reason).inc()
         logger.error(f"Job {job_id} file error: {exc}")
         _report_error(result, webhook_url, api_client, wire_version, "file", str(exc))
         return
@@ -369,6 +407,7 @@ def scan_task(
     except encryption.DecryptionError as exc:
         # A retry can't fix bad bytes or a bad key — report as a file error so
         # the caller drops the file instead of looping. Never log the key.
+        metrics.DOWNLOADS.labels("decrypt_failed").inc()
         logger.error(f"Job {job_id} decryption failed: {exc}")
         _report_error(
             result,
@@ -381,6 +420,7 @@ def scan_task(
         return
 
     except SSRFValidationError as exc:
+        metrics.DOWNLOADS.labels("blocked").inc()
         logger.error(f"Job {job_id} blocked by scan policy: {exc}")
         _report_error(
             result,
@@ -395,6 +435,7 @@ def scan_task(
     except http_requests.RequestException as exc:
         # Download failures report at once: the URL is frozen in the task args,
         # so a stale/expired presigned URL wouldn't recover on retry.
+        metrics.DOWNLOADS.labels("http_error").inc()
         logger.error(f"Job {job_id} download failed: {exc}")
         _report_error(
             result,
@@ -407,6 +448,8 @@ def scan_task(
         return
 
     except Exception as exc:
+        if not downloaded:
+            metrics.DOWNLOADS.labels("error").inc()
         logger.error(f"Job {job_id} unexpected error: {exc}")
         if _retries_exhausted():
             _report_error(

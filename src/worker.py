@@ -16,9 +16,15 @@ swapped without renaming configuration):
                        delivery so a scan backlog can't delay callbacks)
     WORKER_WATCH       path to watch for code changes and auto-reload
                        (e.g. "." in local dev; leave unset in production)
+
+Metrics (``WORKER_METRICS_*``, see ``worker_metrics.py``): before the CLI starts
+any process, this entrypoint points ``PROMETHEUS_MULTIPROC_DIR`` at a freshly
+wiped directory, so every worker process — and the exposition process that
+aggregates them — uses prometheus_client in multiprocess mode.
 """
 
 import os
+import shutil
 import socket
 import sys
 
@@ -26,7 +32,9 @@ from dramatiq.cli import main, make_argument_parser
 
 # First positional must be the broker module (it sets the global broker); the
 # rest are imported so their actors get registered.
-BROKER_MODULE = "broker"
+# ``worker_metrics:setup`` returns the shared broker (``broker.py``) with the
+# worker-only metrics middleware added.
+BROKER_MODULE = "worker_metrics:setup"
 TASK_MODULES = ["tasks", "health"]
 # The healthcheck's own queue (see health.py), consumed whatever WORKER_QUEUES
 # says. Not imported from health.py: that would build the broker in this
@@ -35,6 +43,7 @@ PING_QUEUE = f"ping.{socket.gethostname()}"
 
 
 def build_argv():
+    """The dramatiq CLI arguments, built from the ``WORKER_*`` environment."""
     argv = [
         BROKER_MODULE,
         *TASK_MODULES,
@@ -52,7 +61,26 @@ def build_argv():
     return argv
 
 
+def prepare_metrics_dir():
+    """Point prometheus_client (ours and dramatiq's middleware) at a fresh
+    multiprocess directory. Must run before anything imports prometheus_client:
+    it picks its storage at import time. Wiped so samples from a previous run
+    (or a reused PID) don't add up into this one."""
+    import worker_metrics
+
+    if not worker_metrics.enabled():
+        return
+    path = worker_metrics.metrics_dir()
+    shutil.rmtree(path, ignore_errors=True)
+    # exist_ok: rmtree can't remove a mount point, only empty it.
+    os.makedirs(path, exist_ok=True)
+    os.environ["PROMETHEUS_MULTIPROC_DIR"] = path
+    os.environ["dramatiq_prom_db"] = path
+
+
 if __name__ == "__main__":
+    prepare_metrics_dir()
+
     from scanner import validate_registry
 
     validate_registry()  # fail fast on an inconsistent category/scanner config

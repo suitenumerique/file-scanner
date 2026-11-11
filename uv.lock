@@ -422,15 +422,6 @@ wheels = [
 ]
 
 [[package]]
-name = "dnspython"
-version = "2.9.1"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/91/21/7fcd6780f61e9756aafaea760560509bb4111375daa2e23c1be7a89f33f1/dnspython-2.9.1.tar.gz", hash = "sha256:9a6d30e55f8dc63e6052597666112bff0586b95a2474a9deda03afbbf820d37a", size = 455302, upload-time = "2026-10-29T18:05:12.156Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/61/55/f90405bbbbd3dd8f788e92cec2d39964f5c09783f0570fc35f3bb3381485/dnspython-2.9.1-py3-none-any.whl", hash = "sha256:7c81caf8de1ed57b8cfc7e0ad4f528a0b8ceace473c7eb946df195dc9def751f", size = 360364, upload-time = "2026-10-29T18:05:10.206Z" },
-]
-
-[[package]]
 name = "dramatiq"
 version = "2.2.0"
 source = { registry = "https://pypi.org/simple" }
@@ -472,7 +463,6 @@ dependencies = [
     { name = "clamd" },
     { name = "click" },
     { name = "cryptography" },
-    { name = "dnspython" },
     { name = "dramatiq" },
     { name = "dramatiq-redis-streams" },
     { name = "fastapi" },
@@ -501,7 +491,6 @@ requires-dist = [
     { name = "clamd", specifier = "==1.0.2" },
     { name = "click", specifier = ">=8.3.3" },
     { name = "cryptography", specifier = "==50.0.1" },
-    { name = "dnspython", specifier = "==2.9.1" },
     { name = "dramatiq", specifier = "==2.2.0" },
     { name = "dramatiq-redis-streams", git = "https://github.com/sylvinus/dramatiq-redis-streams.git?rev=819912de7259361688fcfa1b91b0c465ecd2b6e4" },
     { name = "fastapi", specifier = "==0.139.2" },
