@@ -87,15 +87,6 @@ def partial(tag: str) -> Verdict:
     return Verdict("partial", tag)
 
 
-@dataclass
-class VersionInfo:
-    """Signature-database freshness, when a backend can report it."""
-
-    actual: str | None
-    required: str | None
-    outdated: bool
-
-
 class Scanner(ABC):
     """A pluggable file scanner. Implementations live in ``scanners/``.
 
@@ -126,10 +117,6 @@ class Scanner(ABC):
         Raises :class:`ScannerError` if the scan could not be carried out
         (transient — the caller may retry).
         """
-
-    def version(self) -> VersionInfo | None:
-        """Signature-freshness info, or None if the backend can't report it."""
-        return None
 
 
 # --- Per-scanner result + combined report ---
@@ -557,13 +544,16 @@ def validate_registry() -> None:
             )
 
 
-def run_scanners(names: list[str], open_file, api_client: str = "") -> ScanReport:
+def run_scanners(
+    names: list[str], open_file, api_client: str = "", mode: str = metrics.SYNC
+) -> ScanReport:
     """Run each named scanner **concurrently** and collect a :class:`ScanReport`.
 
     ``open_file`` is a callable returning a fresh readable file positioned at 0 —
     each scanner gets its own handle (so clamav and exav can stream in parallel).
-    ``api_client`` is the calling service (JWT ``iss``), recorded as a metric
-    label. A scanner that fails transiently becomes an ``error`` result rather
+    ``api_client`` is the calling service (JWT ``iss``) and ``mode`` the path the
+    scan came through (``sync`` / ``async``), both recorded as metric labels.
+    A scanner that fails transiently becomes an ``error`` result rather
     than aborting the others. Results keep ``names`` order.
     """
 
@@ -595,7 +585,7 @@ def run_scanners(names: list[str], open_file, api_client: str = "") -> ScanRepor
             scored=scanner.scored,
             advisory=name in advisory_scanners(),
         )
-        metrics.record(result, api_client)
+        metrics.record_scan(result, mode, api_client)
         return result
 
     if len(names) == 1:

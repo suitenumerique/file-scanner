@@ -63,7 +63,7 @@ a file over ~2 GB), exav returns a `partial` verdict with a structured tag
 (see [Extended verdicts](#extended-verdicts)). Its streaming matcher runs in
 constant memory, so the file size cap is a configured limit, not a memory
 one. exav manages its own database reloads, so it reports no
-signature-freshness metric.
+signature-database metric.
 
 > exav can replace clamav outright (`DEFAULT_SCANNERS={"malware": ["exav"]}`)
 > or run next to it. While it is young (0.0.x), running both for a while and

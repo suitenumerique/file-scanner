@@ -7,6 +7,7 @@ import httpx
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from fastapi.testclient import TestClient
+from prometheus_client import REGISTRY
 
 import jwt_auth
 from app import app
@@ -98,6 +99,12 @@ def clamav_cd(clamav):
     cd = mock.MagicMock()
     with mock.patch.object(clamav, "_client", return_value=cd):
         yield cd
+
+
+def sample(name: str, **labels) -> float:
+    """A sample of the process-wide Prometheus registry (0 when absent). Metrics
+    are global and accumulate across tests, so compare before/after deltas."""
+    return REGISTRY.get_sample_value(name, labels) or 0.0
 
 
 @pytest.fixture

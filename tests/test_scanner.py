@@ -8,6 +8,7 @@ import clamd
 import pytest
 
 import scanner as scanner_mod
+import scanners.clamav as clamav_mod
 from scanner import (
     ScannerError,
     ScannerResult,
@@ -20,9 +21,9 @@ from scanner import (
 )
 from scanners.clamav import (
     ClamavScanner,
+    DatabaseInfo,
+    parse_database_info,
     parse_hosts,
-    parse_local_version,
-    parse_remote_version,
 )
 from scanners.exav import ExavScanner
 
@@ -38,17 +39,47 @@ def _kind(report, category="malware"):
     return report.verdicts()[category].kind
 
 
-def test_parse_local_version():
-    assert (
-        parse_local_version("ClamAV 0.100.2/12321/Fri May 31 07:57:34 2019") == "12321"
+def test_parse_database_info():
+    # 2019-05-31T07:57:34Z
+    info = parse_database_info("ClamAV 0.100.2/12321/Fri May 31 07:57:34 2019\n")
+    assert info == DatabaseInfo(12321, 1559289454.0)
+    # ctime pads a one-digit day with a space.
+    info = parse_database_info("ClamAV 1.4.3/27000/Mon Nov  3 08:00:00 2025")
+    assert info == DatabaseInfo(27000, 1762156800.0)
+
+
+def test_parse_database_info_without_a_database():
+    assert parse_database_info("ClamAV 1.4.3") == DatabaseInfo(None, None)
+    assert parse_database_info("ClamAV 1.4.3/27000/invalid timestamp") == (
+        DatabaseInfo(27000, None)
     )
 
 
-def test_parse_remote_version():
-    assert (
-        parse_remote_version("220.101.2:58:remote:1559294940:1:63:48725:32823")
-        == "remote"
-    )
+def test_database_info_asks_every_daemon(monkeypatch):
+    monkeypatch.setattr(scanner_mod.settings, "clamav_socket", "")
+    monkeypatch.setattr(scanner_mod.settings, "clamav_hosts", "c1:3310,c2:3311")
+    replies = {"c1": "ClamAV 1.4.3/27000/Mon Nov  3 08:00:00 2025"}
+    seen = []
+
+    def _client(host, port, timeout):
+        seen.append((host, port, timeout))
+        cd = mock.MagicMock()
+        if host in replies:
+            cd.version.return_value = replies[host]
+        else:
+            cd.version.side_effect = clamd.ConnectionError("refused")
+        return cd
+
+    monkeypatch.setattr(clamav_mod.clamd, "ClamdNetworkSocket", _client)
+    assert ClamavScanner().database_info() == {
+        "c1:3310": DatabaseInfo(27000, 1762156800.0),
+        "c2:3311": None,
+    }
+    # Each daemon, with the short probe timeout (not the scan one).
+    assert sorted(seen) == [
+        ("c1", 3310, clamav_mod._PROBE_TIMEOUT),
+        ("c2", 3311, clamav_mod._PROBE_TIMEOUT),
+    ]
 
 
 # --- resolve_scanners: categories union scanners ---
@@ -720,7 +751,7 @@ def test_exav_uses_its_own_pool_and_skips_version(monkeypatch):
     sc = ExavScanner()
     assert isinstance(sc, ClamavScanner)  # reuses the host-pool + ping plumbing
     assert sc._endpoints() == (None, [("exav1", 3310)])
-    assert sc.version() is None
+    assert sc.database_info() == {}
 
 
 # --- exav EXINSTREAM JSON verdict parsing ---
