@@ -28,7 +28,7 @@ Redis so callers can poll a job by id instead of receiving a webhook.
 | `GET`  | `/api/v1.0/jobs/{job_id}` | JWT | Poll an async job's result (only when `WORKER_RESULT_TTL > 0`, else `404`). |
 | `GET`  | `/check`, `/` | — | Liveness: `200 Service OK` when the scanners answer, else `503`. |
 | `GET`  | `/.well-known/jwks.json` | — | Webhook-signing public key(s) (JWK Set) for receivers to verify signed callbacks. |
-| `GET`  | `/metrics` | — | Prometheus exposition, incl. signature freshness (see [Monitoring](#monitoring)). |
+| `GET`  | `/metrics` | — | Prometheus exposition of the web process (see [Monitoring](#monitoring)); the worker serves its own on `:9191`. |
 
 Full request/response schemas: [docs/api.md](docs/api.md).
 
@@ -76,7 +76,7 @@ make stop      # stop the stack
 | Service | URL / Port | Description | Credentials |
 | --- | --- | --- | --- |
 | **app** (web) | [http://localhost:8090](http://localhost:8090) | FastAPI REST API + `/metrics` | JWT — dev caller `dev-issuer` (throwaway key, see [Auth & callers](#auth--callers)) |
-| **worker** | — | dramatiq worker — async scans (`scans` queue) + webhook delivery (`webhooks` queue) | — |
+| **worker** | [http://localhost:9191/metrics](http://localhost:9191/metrics) | dramatiq worker — async scans (`scans` queue) + webhook delivery (`webhooks` queue) | — |
 | **clamav** | `localhost:3310` | ClamAV / exav daemon (clamd protocol) | none |
 | **redis** | `localhost:6380` | dramatiq broker (Redis Streams) | none |
 
@@ -111,15 +111,16 @@ get `401`. Full model: [docs/security.md](docs/security.md#authentication).
 
 ## Monitoring
 
-- **`GET /metrics`** exposes Prometheus metrics: default process metrics plus
-  `filescanner_scans_total{scanner,category,verdict,api_client}` and
-  `filescanner_scan_duration_seconds{scanner,api_client}` (`api_client` is the
-  calling service's JWT `iss`, so scans break down per consumer). Set
-  **`PROMETHEUS_API_KEY`** to require `Authorization: Bearer <key>` (unset = open,
-  so isolate it at the network layer — and note the `api_client` label exposes
-  caller identities). Sync scans are counted in the web process; the worker
-  process counts async scans (scrape it separately, or use prometheus
-  multiprocess mode).
+- **Prometheus metrics** on two endpoints, each scraped as its own target: the
+  web app's **`GET /metrics`** (HTTP traffic, sync scans,
+  ClamAV signature database age, queue backlog / age / dead letters) and the worker's
+  **`:9191/metrics`** (`WORKER_METRICS_PORT`: async scans, downloads, webhook
+  deliveries, dramatiq message metrics). Scan counters carry an `api_client`
+  label — the calling service's JWT `iss` — so they break down per consumer.
+  Set **`PROMETHEUS_API_KEY`** to require `Authorization: Bearer <key>` on both
+  (unset = open, so isolate them at the network layer — the `api_client` label
+  exposes caller identities). Catalogue, scrape config and alert queries:
+  [docs/metrics.md](docs/metrics.md).
 - **Queue dashboard.** The broker
   ([`dramatiq-redis-streams`](https://github.com/sylvinus/dramatiq-redis-streams))
   ships a dashboard for inspecting/replaying/**deleting** queued jobs. Upstream
@@ -167,6 +168,7 @@ docs/              reference documentation (see below)
 | [docs/api.md](docs/api.md) | Full endpoint reference and payload schemas. |
 | [docs/scanner-backends.md](docs/scanner-backends.md) | clamav / exav / jcop and the extended verdicts. |
 | [docs/deployment.md](docs/deployment.md) | Configuration, process types, running it. |
+| [docs/metrics.md](docs/metrics.md) | Prometheus metrics catalogue, scraping, alert queries. |
 | [docs/security.md](docs/security.md) | SSRF protection, resource limits, threat model. |
 
 ## Contributing

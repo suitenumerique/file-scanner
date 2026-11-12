@@ -16,24 +16,25 @@ from fastapi import (
     UploadFile,
 )
 from fastapi.responses import PlainTextResponse
-from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+from prometheus_client import CONTENT_TYPE_LATEST, REGISTRY, generate_latest
 from pydantic import BaseModel, Field, HttpUrl, field_validator
 
 import encryption
 import jwt_auth
+import metrics
 import results
 import wire
 from config import get_settings
-from metrics import refresh_signatures
 from scanner import (
     assert_size_cap_decidable,
+    category_map,
     get_scanner,
     resolve_scanners,
     run_scanners,
     validate_registry,
 )
 from ssrf import SSRFValidationError
-from tasks import scan_task
+from tasks import deliver_webhook, scan_task
 from validation import assert_scannable
 from version import __version__
 
@@ -199,6 +200,43 @@ class ScanAsyncRequest(BaseModel):
 # --- App ---
 
 
+# Bounds every queue-state read: a hung Redis must fail the scrape fast
+# (filescanner_queue_stats_success=0) rather than pin threadpool threads, which
+# the sync endpoints share.
+_QUEUE_STATS_TIMEOUT = 2.0
+
+
+def _queue_stats_collector() -> "metrics.QueueStatsCollector | None":
+    """The queue-state gauges for /metrics, read from the broker's Redis at
+    scrape time, or None in eager mode (no Redis) / with METRICS_QUEUE_STATS off.
+
+    It gets its own client, not the broker's: that one has no socket timeout."""
+    if settings.worker_eager or not settings.metrics_queue_stats:
+        return None
+    import redis
+
+    client = redis.Redis.from_url(
+        settings.worker_broker_url,
+        socket_timeout=_QUEUE_STATS_TIMEOUT,
+        socket_connect_timeout=_QUEUE_STATS_TIMEOUT,
+    )
+    return metrics.QueueStatsCollector(
+        client,
+        settings.worker_queue_namespace,
+        # deliver_webhook is imported for its queue name: list it even before
+        # anything was ever enqueued on it.
+        queues=[scan_task.queue_name, deliver_webhook.queue_name],
+    )
+
+
+def _clamav_database_collector() -> "metrics.ClamavDatabaseCollector | None":
+    """The signature-database gauges for /metrics, when clamav is one of the
+    deployment's engines (``DEFAULT_SCANNERS``)."""
+    if not any("clamav" in names for names in category_map().values()):
+        return None
+    return metrics.ClamavDatabaseCollector(get_scanner("clamav").database_info)
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     # Fail fast at boot if the category/scanner configuration is inconsistent.
@@ -209,10 +247,24 @@ async def lifespan(_app: FastAPI):
             "api_client label exposes caller identities. Set it, or isolate "
             "/metrics at the network layer."
         )
-    yield
+    # Scrape-time collectors: registered for the app's lifetime only.
+    collectors = [
+        c
+        for c in (_queue_stats_collector(), _clamav_database_collector())
+        if c is not None
+    ]
+    for collector in collectors:
+        REGISTRY.register(collector)
+    try:
+        yield
+    finally:
+        for collector in collectors:
+            REGISTRY.unregister(collector)
+            collector.close()
 
 
 app = FastAPI(title="File Scanner", version=__version__, lifespan=lifespan)
+app.add_middleware(metrics.HTTPMetricsMiddleware)
 
 
 # The dramatiq-redis-streams queue dashboard is destructive; the same
@@ -265,13 +317,8 @@ def verify_prometheus(request: Request) -> None:
 
 
 @app.get("/metrics")
-def metrics(_: None = Depends(verify_prometheus)):
-    """Prometheus exposition: default process metrics, scan counters, and the
-    signature-freshness gauges (refreshed lazily here)."""
-    try:
-        refresh_signatures(resolve_scanners(), get_scanner)
-    except ValueError:
-        pass
+def metrics_endpoint(_: None = Depends(verify_prometheus)):
+    """Prometheus exposition of the web process (see docs/metrics.md)."""
     return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
@@ -334,7 +381,9 @@ def scan(
     # and they can run in parallel.
     data = file.file.read()
     logger.info(f"Scanning {file.filename} for {username} with {names}")
+    metrics.FILE_SIZE.labels(metrics.SYNC).observe(len(data))
     report = run_scanners(names, lambda: io.BytesIO(data), api_client=username)
+    metrics.record_report(report, metrics.SYNC, username)
     if report.all_errored:
         # Every deciding scanner failed to run and nothing was detected — the
         # report says nothing about the file. A detection keeps the 200.

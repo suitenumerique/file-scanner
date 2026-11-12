@@ -13,6 +13,7 @@ from unittest import mock
 
 import clamd
 import pytest
+from conftest import sample
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 import encryption
@@ -657,3 +658,143 @@ def test_the_submitted_version_is_carried_into_the_message(auth_client):
     hand-off that lets a callback know its own shape later."""
     assert _submitted_version(auth_client, ASYNC_URL_V1) == wire.V1
     assert _submitted_version(auth_client, ASYNC_URL) == wire.V2
+
+
+# --- metrics ---
+
+
+def test_task_metrics_on_success(run_task):
+    downloads = sample("filescanner_downloads_total", outcome="ok")
+    scans = sample(
+        "filescanner_scans_total",
+        scanner="clamav",
+        category="malware",
+        verdict="clean",
+        mode="async",
+        api_client="",
+    )
+    reports = sample(
+        "filescanner_reports_total",
+        category="malware",
+        verdict="clean",
+        mode="async",
+        api_client="",
+    )
+    jobs = sample(
+        "filescanner_async_jobs_total", status="done", error_kind="", api_client=""
+    )
+    sizes = sample("filescanner_file_size_bytes_sum", mode="async")
+
+    run_task(chunks=[b"1234", b"567"])
+
+    assert sample("filescanner_downloads_total", outcome="ok") == downloads + 1
+    assert (
+        sample(
+            "filescanner_scans_total",
+            scanner="clamav",
+            category="malware",
+            verdict="clean",
+            mode="async",
+            api_client="",
+        )
+        == scans + 1
+    )
+    assert (
+        sample(
+            "filescanner_reports_total",
+            category="malware",
+            verdict="clean",
+            mode="async",
+            api_client="",
+        )
+        == reports + 1
+    )
+    assert (
+        sample(
+            "filescanner_async_jobs_total", status="done", error_kind="", api_client=""
+        )
+        == jobs + 1
+    )
+    assert sample("filescanner_file_size_bytes_sum", mode="async") == sizes + 7
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "outcome", "error_kind"),
+    [
+        ({"content_length": 10**12}, "too_large", "file"),
+        (
+            {"get": mock.MagicMock(side_effect=tasks.http_requests.ConnectionError())},
+            "http_error",
+            "transient",
+        ),
+        (
+            {"get": mock.MagicMock(side_effect=tasks.SSRFValidationError("loopback"))},
+            "blocked",
+            "file",
+        ),
+    ],
+)
+def test_task_metrics_on_download_failure(run_task, kwargs, outcome, error_kind):
+    before = sample("filescanner_downloads_total", outcome=outcome)
+    jobs = sample(
+        "filescanner_async_jobs_total",
+        status="error",
+        error_kind=error_kind,
+        api_client="",
+    )
+    run_task(**kwargs)
+    assert sample("filescanner_downloads_total", outcome=outcome) == before + 1
+    assert (
+        sample(
+            "filescanner_async_jobs_total",
+            status="error",
+            error_kind=error_kind,
+            api_client="",
+        )
+        == jobs + 1
+    )
+
+
+def test_task_metrics_on_download_timeout(run_task, monkeypatch):
+    monkeypatch.setattr(tasks.settings, "download_max_seconds", -1)
+    before = sample("filescanner_downloads_total", outcome="timeout")
+    run_task()
+    assert sample("filescanner_downloads_total", outcome="timeout") == before + 1
+
+
+def test_webhook_metrics():
+    ok = sample("filescanner_webhook_deliveries_total", outcome="ok")
+    gave_up = sample("filescanner_webhook_deliveries_total", outcome="gave_up")
+    retry = sample("filescanner_webhook_deliveries_total", outcome="retry")
+    blocked = sample("filescanner_webhook_deliveries_total", outcome="blocked")
+    posts = sample("filescanner_webhook_duration_seconds_count")
+
+    resp = mock.MagicMock(is_redirect=False)
+    with mock.patch.object(tasks._session, "post", return_value=resp):
+        tasks.deliver_webhook.fn("http://cb/av", {"job_id": "j"})
+    failure = tasks.http_requests.ConnectionError("reset")
+    with mock.patch.object(tasks._session, "post", side_effect=failure):
+        # Outside a worker there is no retry loop: the attempt is the last one.
+        with pytest.raises(tasks.http_requests.RequestException):
+            tasks.deliver_webhook.fn("http://cb/av", {"job_id": "j"})
+        # Inside one, with budget left, it will be retried.
+        message = mock.MagicMock(options={"retries": 0})
+        with mock.patch.object(
+            tasks.CurrentMessage, "get_current_message", return_value=message
+        ):
+            with pytest.raises(tasks.http_requests.RequestException):
+                tasks.deliver_webhook.fn("http://cb/av", {"job_id": "j"})
+    with mock.patch.object(
+        tasks._session, "post", side_effect=tasks.SSRFValidationError("loopback")
+    ):
+        tasks.deliver_webhook.fn("http://cb/av", {"job_id": "j"})
+
+    assert sample("filescanner_webhook_deliveries_total", outcome="ok") == ok + 1
+    assert (
+        sample("filescanner_webhook_deliveries_total", outcome="gave_up") == gave_up + 1
+    )
+    assert sample("filescanner_webhook_deliveries_total", outcome="retry") == retry + 1
+    assert (
+        sample("filescanner_webhook_deliveries_total", outcome="blocked") == blocked + 1
+    )
+    assert sample("filescanner_webhook_duration_seconds_count") == posts + 4

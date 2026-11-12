@@ -32,7 +32,7 @@ with them; other backends use their own transport (`jcop` submits over HTTP).
 | Broker | `broker.py` / `worker.py` | dramatiq broker setup + `@register_task`; the worker entrypoint. |
 | Scanner interface | `scanner.py` | `Scanner` ABC, `Verdict`, the backend registry, category resolution (`resolve_scanners`, `category_map`, `validate_registry`), and `run_scanners()` (parallel orchestration + per-category `ScanReport`). |
 | Scanner backends | `scanners/` | Concrete engines, each declaring its `category`: `clamav.py`, `exav.py` (subclass), `jcop.py`. |
-| Metrics | `metrics.py` | Prometheus counters/gauges; `/metrics` exposition. |
+| Metrics | `metrics.py` / `worker_metrics.py` | Prometheus metrics, the web `/metrics` collectors (queue state, signature refresher, HTTP middleware); the worker's multiprocess exposition endpoint. See [metrics.md](metrics.md). |
 | SSRF guard | `ssrf.py` | Hostname/IP validation, IP-pinned HTTP session. Vendored from [messages](https://github.com/suitenumerique/messages). |
 | Policy | `validation.py` | Positive host allowlist + SSRF guard, enforced at the web layer AND the worker. |
 | Config | `config.py` | Environment-driven settings with named profiles. |

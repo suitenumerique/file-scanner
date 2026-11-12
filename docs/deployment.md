@@ -107,14 +107,16 @@ secrets** — the `*.defaults` keys are throwaway.
 | `JWT_LEEWAY` | `60` | Clock-skew leeway (s) for `exp`/`iat`/`nbf`. |
 | `JWT_SIGNING_KEY` | *(empty)* | base64url raw Ed25519 private seed for **signing outgoing webhooks**. Public half is derived + served at `/.well-known/jwks.json`. Empty ⇒ webhooks unsigned. |
 | `JWT_SIGNING_KID` / `JWT_ISSUER` | *(empty)* / `file-scanner` | `kid` advertised in the JWKS + webhook token headers (any stable label — a date/version like `2026-07` or `v1`, or a JWK thumbprint; **set one** so receivers can match keys across a rotation); `iss` we stamp on webhook tokens. |
-| `PROMETHEUS_API_KEY` | *(empty)* | If set, `/metrics` requires `Authorization: Bearer <key>`. Empty = open (isolate it at the network layer). |
+| `PROMETHEUS_API_KEY` | *(empty)* | If set, both metrics endpoints (web and worker) require `Authorization: Bearer <key>`. Empty = open (isolate them at the network layer). |
+| `METRICS_QUEUE_STATS` | `true` | Queue-state gauges on the web `/metrics` (see [metrics.md](metrics.md#queue-state)). |
+| `WORKER_METRICS_PORT` / `WORKER_METRICS_HOST` | `9191` / `0.0.0.0` | The worker's metrics endpoint; port `0` disables it. |
+| `WORKER_METRICS_DIR` | *(tmp)/file-scanner-metrics* | Where the worker processes share their samples (wiped at start; one per worker instance). |
 | `DEFAULT_SCANNERS` | `{"malware": ["clamav"]}` | JSON `category → [engines]` map: the categories that exist and which engines compose each. |
 | `DEFAULT_CATEGORIES` | `malware` | Comma-separated categories run when a request names neither `categories` nor `scanners`. Must be keys of `DEFAULT_SCANNERS`. |
 | `ADVISORY_SCANNERS` | *(empty)* | Engines whose detections count but whose failure to examine a file does not, when a deciding engine of the category did (see [categories.md](categories.md#advisory-scanners)). E.g. `clamav` next to exav. |
 | `CLAMAV_SOCKET` | *(empty)* | Unix socket path; takes precedence over the host list. |
 | `CLAMAV_HOSTS` | `localhost:3310` | `host:port,…` clamav daemon pool; a single entry is one daemon, several enable client-side balancing. |
 | `EXAV_HOSTS` | *(empty)* | `host:port,…` pool for the exav scanner (required to use `exav`). See [Running exav](#running-exav). |
-| `CLAMAV_TXT_URI` | `current.cvd.clamav.net` | DNS TXT record for the latest signature version (freshness gauge). |
 | `JCOP_BASE_URL` / `JCOP_API_KEY` | *(empty)* | jcop backend endpoint + token (required to use `jcop`). |
 | `JCOP_RESULT_TIMEOUT` / `JCOP_SUBMIT_TIMEOUT` / `JCOP_POLL_INTERVAL` | `30` / `600` / `5` | jcop poll timeout / total budget / poll interval (s). |
 | `WORKER_BROKER_URL` | `redis://localhost:6379/0` | Redis broker for async scans. |
@@ -329,23 +331,23 @@ A `HEALTHCHECK` polls `GET /check`.
 
 ## Monitoring
 
-`GET /metrics` exposes Prometheus metrics — default process metrics, scan
-counters (`filescanner_scans_total{scanner,category,verdict,api_client}`,
-`filescanner_scan_duration_seconds{scanner,api_client}`), and signature freshness
-(`filescanner_signature_outdated{scanner}`,
-`filescanner_signature_version{scanner}`, refreshed lazily on scrape, 300 s TTL).
+Two Prometheus endpoints, each scraped as its own target (one per instance):
+the web app's `GET /metrics` and the worker's `:9191/metrics`
+(`WORKER_METRICS_PORT`, `0` disables it). The full catalogue, an Alloy scrape
+config and alert queries are in [metrics.md](metrics.md). The queue-state gauges
+describe the shared broker, so with several web instances aggregate them with
+`max` (or set `METRICS_QUEUE_STATS=false` on all but one).
+
 Set **`PROMETHEUS_API_KEY`** to require `Authorization: Bearer <key>` on
-`/metrics` (constant-time; Prometheus sends it via `bearer_token`/`authorization`
+both endpoints (constant-time; Prometheus sends it via `bearer_token`/`authorization`
 in the scrape config) — matching the convention in suitenumerique/messages. Left
 unset, `/metrics` is **open**, which is only safe when the endpoint is isolated
 at the network layer (a dedicated metrics port the public ingress doesn't route,
 `kube-rbac-proxy`, or mTLS). This matters here because the `api_client` label is
 the JWT `iss` of the calling service — caller identities and their scan
 volumes — so **set `PROMETHEUS_API_KEY` on any deployment where `/metrics` is
-reachable from an untrusted network**. Sync scans are counted in the web process;
-the worker process counts async scans, so scrape it too (or use
-`PROMETHEUS_MULTIPROC_DIR`). Keep each scanner's own updater (`freshclam` /
-exav's reload) running.
+reachable from an untrusted network**. Keep each scanner's own updater
+(`freshclam` / exav's reload) running.
 
 ## Queue dashboard
 

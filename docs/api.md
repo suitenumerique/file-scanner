@@ -246,11 +246,8 @@ callbacks. `{"keys": []}` when no signing key is configured.
 
 ## `GET /metrics` — Prometheus
 
-Prometheus exposition (bearer-gated when `PROMETHEUS_API_KEY` is set): default
-process metrics, scan counters
-(`filescanner_scans_total{scanner,category,verdict,api_client}`,
-`filescanner_scan_duration_seconds{scanner,api_client}`; `api_client` is the
-caller's JWT `iss`), and signature-freshness gauges
-(`filescanner_signature_outdated{scanner}`,
-`filescanner_signature_version{scanner}`). See
-[deployment.md](deployment.md#monitoring) for how to secure it.
+Prometheus exposition of the web process (bearer-gated when
+`PROMETHEUS_API_KEY` is set): HTTP traffic, sync scans,
+ClamAV signature database, queue state and Python process metrics. The worker serves its own metrics on a
+separate port. Catalogue: [metrics.md](metrics.md); securing it:
+[deployment.md](deployment.md#monitoring).

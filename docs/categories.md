@@ -214,5 +214,5 @@ Decisions settled while implementing:
 - The service owns the category vocabulary (a scanner's `category` attribute);
   the `DEFAULT_SCANNERS` map must list each engine under the category it
   declares, enforced at boot.
-- Sync scans are counted in the web process, async in the worker — scrape both
-  or use `PROMETHEUS_MULTIPROC_DIR` (unchanged by categories).
+- Sync scans are counted in the web process, async in the worker (its own
+  metrics endpoint) — scrape both, see [metrics.md](metrics.md).

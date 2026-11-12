@@ -44,6 +44,8 @@ services:
     env_file:
       - deploy/env/app.defaults
       - deploy/env/app.local
+    ports:
+      - 9191:9191  # worker metrics (WORKER_METRICS_PORT)
     environment:
       MAX_URL_SIZE: *max_url_size
       # Auto-reload the worker on code changes in dev.
