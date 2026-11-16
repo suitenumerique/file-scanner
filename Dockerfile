@@ -13,13 +13,15 @@
 
 ARG PYTHON_VERSION=3.14.10
 ARG UV_VERSION=0.13.6
+# The multi-arch index digest of that tag: move both together.
+ARG UV_DIGEST=sha256:af22a52f5eafef3d78e551599d405c02df61919d18028f0cea8eda93bc9986d0
 
 # ---- uv binary: ARG expansion is allowed in FROM (unlike COPY --from) ----
-FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS uv-bin
+FROM ghcr.io/astral-sh/uv:${UV_VERSION}@${UV_DIGEST} AS uv-bin
 
 # ---- uv + managed Python ----
-FROM debian:trixie-slim AS uv
-ENV MIN_UPDATE_DATE="2026-07-20"
+FROM debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2 AS uv
+ENV MIN_UPDATE_DATE="2026-11-16"
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get upgrade -y \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
@@ -76,7 +78,7 @@ CMD ["python", "-c", "import os, uvicorn; uvicorn.run('app:app', host='0.0.0.0',
 # cc-debian13 provides glibc + libstdc++ for the compiled wheels (pydantic-core,
 # uvloop, httptools); everything else is pure Python. Runs as `nonroot`.
 # Debug with: docker run --entrypoint=sh gcr.io/distroless/cc-debian13:debug-nonroot
-FROM gcr.io/distroless/cc-debian13:nonroot AS runtime-distroless-prod
+FROM gcr.io/distroless/cc-debian13:nonroot@sha256:cb87acc574abe719b6e5c547384defa2f7b1f24af9605d3f618cf852495d8be2 AS runtime-distroless-prod
 WORKDIR /app
 COPY --from=python-stripped /opt/python /opt/python
 COPY --from=build /venv /venv
