@@ -11,9 +11,7 @@ import clamd
 import pytest
 from conftest import is_eicar_signature
 
-import metrics
 from app import settings
-from scanner import VersionInfo
 
 SCAN_URL = "/api/v2.0/scan"
 SCAN_URL_V1 = "/api/v1.0/scan"
@@ -44,28 +42,6 @@ def test_metrics_label_api_client(auth_client, clamav_cd):
     auth_client.post(SCAN_URL, files={"file": ("f.txt", b"data")})
     r = auth_client.get("/metrics")
     assert 'api_client="dev-issuer"' in r.text
-
-
-def test_metrics_signature_gauges(client, clamav, monkeypatch):
-    # Bypass the refresh TTL. Must be -inf, not 0.0: the check is
-    # ``monotonic() - _last < TTL`` and ``monotonic()`` is seconds since boot, so
-    # on a freshly-booted CI runner it can be < TTL, leaving 0.0 within the window
-    # and skipping the refresh. "Infinitely long ago" is always past the TTL.
-    monkeypatch.setattr(metrics, "_last_signature_refresh", float("-inf"))
-    # ``/metrics`` uses ``resolve_scanners()`` to decide which scanners to
-    # refresh, and that reads ``DEFAULT_CATEGORIES`` from settings. An
-    # empty default (env-less CI runs) makes ``resolve_scanners`` raise
-    # ValueError, which the endpoint swallows — no gauge samples emit, and
-    # the assertions below never see them. Pin the default explicitly so
-    # the test is env-agnostic.
-    monkeypatch.setattr(settings, "default_categories", "malware")
-    with mock.patch.object(
-        clamav, "version", return_value=VersionInfo("27000", "27000", False)
-    ):
-        r = client.get("/metrics")
-    assert r.status_code == 200
-    assert 'filescanner_signature_outdated{scanner="clamav"} 0.0' in r.text
-    assert 'filescanner_signature_version{scanner="clamav"} 27000.0' in r.text
 
 
 # --- health ---
@@ -195,8 +171,23 @@ def test_partial_is_neither_clean_nor_malware(auth_client, clamav_cd):
 
 def test_all_scanners_error_returns_503(auth_client, clamav_cd):
     clamav_cd.instream.return_value = {"stream": ("ERROR", "Can't allocate memory")}
+    before = _reports_total()
     r = auth_client.post(SCAN_URL, files={"file": ("f.bin", b"data")})
     assert r.status_code == 503
+    # Nothing was returned to the caller: no report counted.
+    assert _reports_total() == before
+
+
+def _reports_total() -> float:
+    from prometheus_client import REGISTRY
+
+    return sum(
+        s.value
+        for m in REGISTRY.collect()
+        if m.name == "filescanner_reports"
+        for s in m.samples
+        if s.name == "filescanner_reports_total"
+    )
 
 
 def test_untagged_file_error_is_partial(auth_client, clamav_cd):

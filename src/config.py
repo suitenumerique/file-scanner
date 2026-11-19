@@ -62,6 +62,24 @@ class Settings(BaseSettings):
     # deployment where /metrics is reachable from an untrusted network.
     # (PROMETHEUS_API_KEY)
     prometheus_api_key: str = ""
+    # Serve the queue-state gauges (backlog, in-flight, oldest message age, DLQ
+    # length, ...) on the web /metrics, read from Redis at scrape time. They
+    # describe the shared broker, so every API instance reports the same
+    # values: with several, enable it on one only or aggregate with max(), not
+    # sum(). (METRICS_QUEUE_STATS)
+    metrics_queue_stats: bool = True
+    # The worker's own metrics endpoint (async scans, downloads, webhooks,
+    # dramatiq message metrics), served at http://HOST:PORT/metrics by a
+    # dedicated process of the worker and gated by PROMETHEUS_API_KEY like the
+    # web one. 0 disables it. (WORKER_METRICS_PORT)
+    worker_metrics_port: int = 9191
+    # Interface the worker metrics endpoint binds to. (WORKER_METRICS_HOST)
+    worker_metrics_host: str = "0.0.0.0"
+    # Directory the worker processes share their metrics through (prometheus
+    # multiprocess mode). Wiped at worker start; must be private to one worker
+    # instance. Empty = a fixed directory under the system temp dir.
+    # (WORKER_METRICS_DIR)
+    worker_metrics_dir: str = ""
 
     # --- Scanner selection ---
     # JSON map of category -> [scanner names]: which categories (axes of
@@ -85,9 +103,6 @@ class Settings(BaseSettings):
     advisory_scanners: str = ""
 
     # --- clamav backend ---
-    # DNS TXT record queried for the latest published signature database version,
-    # exposed as the freshness gauge on /metrics. (CLAMAV_TXT_URI)
-    clamav_txt_uri: str = "current.cvd.clamav.net"
     # Socket timeout (s) for a clamd connection, so an unreachable/hung daemon
     # fails the scan instead of blocking a worker forever. Generous by default to
     # not trip on a legitimately slow scan of a large file. (CLAMAV_TIMEOUT)

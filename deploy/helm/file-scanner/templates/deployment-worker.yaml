@@ -51,6 +51,14 @@ spec:
               value: {{ .Values.worker.queues | quote }}
             - name: DOWNLOAD_DIR
               value: {{ .Values.worker.downloadDir | quote }}
+            - name: WORKER_METRICS_PORT
+              value: {{ .Values.worker.metricsPort | quote }}
+          {{- if .Values.worker.metricsPort }}
+          ports:
+            - name: metrics
+              containerPort: {{ .Values.worker.metricsPort }}
+              protocol: TCP
+          {{- end }}
           envFrom:
             {{- include "file-scanner.envFrom" . | nindent 12 }}
           # Pings this pod's worker through Redis and back (src/health.py).
