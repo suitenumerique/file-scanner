@@ -99,10 +99,12 @@ jobs:
         run: |
           readarray -t TAGS <<< "$META_TAGS"
           FIRST_TAG=""
+          # No --annotation: sources are Docker v2 (oci-mediatypes=false, for
+          # HEALTHCHECK), so the result is a Docker manifest list, which
+          # cannot carry annotations.
           for tag in "${TAGS[@]}"; do
             [ -z "$tag" ] && continue
             docker buildx imagetools create \
-              --annotation "index:org.opencontainers.image.title=file-scanner" \
               -t "$tag" "${tag}-amd64" "${tag}-arm64"
             [ -z "$FIRST_TAG" ] && FIRST_TAG="$tag"
           done
